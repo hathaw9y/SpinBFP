@@ -145,14 +145,27 @@ def _tag_linear_bfp_categories(model) -> None:
         raise ValueError(f"Unsupported model_type: {model.model_type}")
 
 
-def apply_rotate(model, device, hook, rotate: str | None = "hadamard") -> None:
+def prepare_model_for_rotate(model) -> None:
+    add_model_type(model)
+    fuse_norms(model)
+    _tag_linear_bfp_categories(model)
+
+
+def apply_rotate(
+    model,
+    device,
+    hook,
+    rotate: str | None = "hadamard",
+    pre_rotate_callback=None,
+) -> None:
     """
     rotate='hadamard'   : fuse_norms + Hadamard 회전 + attention patch
     rotate=None         : fuse_norms + attention patch without weight-space rotation
     """
-    add_model_type(model)
-    fuse_norms(model)
-    _tag_linear_bfp_categories(model)
+    prepare_model_for_rotate(model)
+    if pre_rotate_callback is not None:
+        pre_rotate_callback()
+
     if rotate is None:
         _patch_attention_only(model, device, hook)
         if getattr(hook, 'weight_bfp', False):

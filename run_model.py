@@ -4,6 +4,7 @@ import torch
 from transformers import AutoModelForCausalLM, AutoTokenizer, set_seed
 
 from rotquant import Hook, apply_rotate
+from rotquant.reconstruction import load_reconstructed_weights
 from utils import eval_ppl_wikitext
 
 
@@ -64,6 +65,12 @@ def parse_args():
     parser.add_argument("--disable_bfp_qk_matmul_key", action="store_true")
     parser.add_argument("--disable_bfp_qk_matmul_query", action="store_true")
     parser.add_argument("--disable_bfp_v_proj", action="store_true")
+    parser.add_argument(
+        "--load_reconstructed_weights",
+        type=str,
+        default=None,
+        help="Load reconstructed down/o projection weights before rotation.",
+    )
     return parser.parse_args()
 
 
@@ -242,7 +249,19 @@ def main():
 
     rotate = "hadamard" if args.rotate else None
     print(f"Apply rotate={rotate or 'none'}")
-    apply_rotate(model, args.device, hook, rotate=rotate)
+
+    def pre_rotate_callback():
+        if args.load_reconstructed_weights is None:
+            return
+        load_reconstructed_weights(model, args.load_reconstructed_weights)
+
+    apply_rotate(
+        model,
+        args.device,
+        hook,
+        rotate=rotate,
+        pre_rotate_callback=pre_rotate_callback,
+    )
 
     print("\n--- PPL evaluation on WikiText-2 ---")
     ppl = eval_ppl_wikitext(model, tokenizer, seq_len=args.ppl_seq_len, device=args.device)
