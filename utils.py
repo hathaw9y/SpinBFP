@@ -6,7 +6,7 @@ def convert2fp16(
     x: torch.Tensor,
     block_size: int = 128,
     mbits: int = 8,
-) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     shape = x.shape
     flat = x.reshape(*x.shape[:-1], -1, block_size).half()
 
@@ -37,17 +37,26 @@ def convert2fp16(
     )
 
     real_exp = (2 ** (shared_exp - 15).half()).expand(*shared_exp.shape[:-1], block_size)
-    return restored.reshape(shape), mantissa_signed.reshape(shape), real_exp.reshape(shape)
+    return (
+        restored.reshape(shape),
+        mantissa_signed.reshape(shape),
+        real_exp.reshape(shape),
+        shared_exp,
+    )
 
 
 def bfp_quantize_activation(
     x: torch.Tensor,
     block_size: int = 128,
     mbits: int = 8,
+    stat_hook=None,
+    stat_name: str | None = None,
 ) -> torch.Tensor:
     if x.shape[-1] % block_size != 0:
         block_size = x.shape[-1]
-    restored, _, _ = convert2fp16(x, block_size=block_size, mbits=mbits)
+    restored, _, _, shared_exp = convert2fp16(x, block_size=block_size, mbits=mbits)
+    if stat_hook is not None and stat_name is not None:
+        stat_hook.record_bfp_shared_exponent(stat_name, shared_exp)
     return restored.to(x.dtype)
 
 
@@ -55,11 +64,15 @@ def bfp_quantize_weight_transpose(
     w: torch.Tensor,
     block_size: int = 128,
     mbits: int = 8,
+    stat_hook=None,
+    stat_name: str | None = None,
 ) -> torch.Tensor:
     wt = w.T.contiguous()
     if wt.shape[-1] % block_size != 0:
         block_size = wt.shape[-1]
-    restored, _, _ = convert2fp16(wt, block_size=block_size, mbits=mbits)
+    restored, _, _, shared_exp = convert2fp16(wt, block_size=block_size, mbits=mbits)
+    if stat_hook is not None and stat_name is not None:
+        stat_hook.record_bfp_shared_exponent(stat_name, shared_exp)
     return restored.T.contiguous().to(w.dtype)
 
 

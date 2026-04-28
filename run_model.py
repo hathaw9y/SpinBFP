@@ -49,6 +49,11 @@ def parse_args():
     )
     parser.add_argument("--weight_bfp_bits", type=int, default=8)
     parser.add_argument("--weight_bfp_block_size", type=int, default=128)
+    parser.add_argument(
+        "--bfp_exponent_stats",
+        action="store_true",
+        help="Print average shared exponent for each BFP application location.",
+    )
     return parser.parse_args()
 
 
@@ -94,10 +99,29 @@ def _build_hook(args, model_dir: str) -> Hook:
     hook.weight_bfp = args.weight_bfp
     hook.weight_bfp_bits = args.weight_bfp_bits
     hook.weight_bfp_block_size = args.weight_bfp_block_size
+    hook.bfp_shared_exponent_stats = args.bfp_exponent_stats
     hook.online_rotate = args.online_rotate
     hook.orth_group_size = args.bfp_block_size
     hook.model_dir = model_dir
     return hook
+
+
+def _print_bfp_shared_exponent_stats(hook) -> None:
+    averages = hook.bfp_shared_exponent_averages()
+    if not averages:
+        print("\n--- BFP shared exponent averages ---")
+        print("No BFP shared exponent stats were collected.")
+        return
+
+    print("\n--- BFP shared exponent averages ---")
+    print(f"{'location':72s} {'mean':>10s} {'blocks':>12s} {'calls':>8s}")
+    for item in averages:
+        print(
+            f"{item['name']:72s} "
+            f"{item['mean']:10.4f} "
+            f"{item['count']:12d} "
+            f"{item['calls']:8d}"
+        )
 
 
 def main():
@@ -116,6 +140,8 @@ def main():
     print("\n--- PPL evaluation on WikiText-2 ---")
     ppl = eval_ppl_wikitext(model, tokenizer, seq_len=args.ppl_seq_len, device=args.device)
     print(f"\n[{args.model}] PPL: {ppl:.4f}")
+    if args.bfp_exponent_stats:
+        _print_bfp_shared_exponent_stats(hook)
 
 
 if __name__ == "__main__":

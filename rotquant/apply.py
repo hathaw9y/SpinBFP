@@ -120,6 +120,10 @@ def _patch_attention_only(model, device, hook) -> None:
 
 
 def _tag_linear_bfp_categories(model) -> None:
+    for name, module in model.named_modules():
+        if isinstance(module, nn.Linear):
+            module._spinkv_bfp_name = name
+
     if model.model_type == 'llama2':
         for layer in model.model.layers:
             attn, mlp = layer.self_attn, layer.mlp

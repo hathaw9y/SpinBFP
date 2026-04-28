@@ -56,8 +56,10 @@ def patch_online_rotate(linear: nn.Linear, R: torch.Tensor, hook=None) -> None:
     def forward_fn(self, x):
         x = x @ R_local.to(x.dtype)
         if hook is not None and hook.bfp:
+            stat_name = f"{getattr(self, '_spinkv_bfp_name', 'linear')}.input"
             x = bfp_quantize_activation(
                 x, hook.bfp_block_size, _bfp_bits_for_linear(self, hook),
+                stat_hook=hook, stat_name=stat_name,
             )
         return torch.nn.functional.linear(x, self.weight, self.bias)
 
@@ -73,8 +75,10 @@ def patch_linear_bfp(linear: nn.Linear, hook) -> None:
 
     def forward_fn(self, x):
         if hook.bfp:
+            stat_name = f"{getattr(self, '_spinkv_bfp_name', 'linear')}.input"
             x = bfp_quantize_activation(
                 x, hook.bfp_block_size, _bfp_bits_for_linear(self, hook),
+                stat_hook=hook, stat_name=stat_name,
             )
         return org_forward(x)
 
@@ -83,8 +87,11 @@ def patch_linear_bfp(linear: nn.Linear, hook) -> None:
 
 @torch.no_grad()
 def apply_linear_weight_bfp(linear: nn.Linear, hook) -> None:
+    stat_name = f"{getattr(linear, '_spinkv_bfp_name', 'linear')}.weight"
     linear.weight.data = bfp_quantize_weight_transpose(
         linear.weight.data,
         getattr(hook, 'weight_bfp_block_size', 128),
         getattr(hook, 'weight_bfp_bits', 8),
+        stat_hook=hook,
+        stat_name=stat_name,
     )

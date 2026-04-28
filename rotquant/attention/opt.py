@@ -65,9 +65,13 @@ def patch_opt_attention(attn_module, R_head, layer_idx: int, hook) -> None:
             qk_bits = _qk_bfp_bits(hook)
             query_states = bfp_quantize_activation(
                 query_states, hook.bfp_block_size, qk_bits,
+                stat_hook=hook,
+                stat_name=f"model.decoder.layers.{layer_idx}.self_attn.query_states",
             )
             key_states = bfp_quantize_activation(
                 key_states, hook.bfp_block_size, qk_bits,
+                stat_hook=hook,
+                stat_name=f"model.decoder.layers.{layer_idx}.self_attn.key_states",
             )
 
         src_len = key_states.size(1)

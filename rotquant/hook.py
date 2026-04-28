@@ -15,3 +15,38 @@ class Hook:
     online_rotate = False
     orth_group_size = 128
     model_dir = None
+
+    def __init__(self):
+        self.bfp_shared_exponent_stats = False
+        self._bfp_shared_exponent_stats = {}
+
+    def record_bfp_shared_exponent(self, name, shared_exp):
+        if not self.bfp_shared_exponent_stats:
+            return
+
+        count = shared_exp.numel()
+        if count == 0:
+            return
+
+        stat = self._bfp_shared_exponent_stats.setdefault(
+            name,
+            {"sum": 0.0, "count": 0, "calls": 0},
+        )
+        stat["sum"] += shared_exp.detach().float().sum().item()
+        stat["count"] += count
+        stat["calls"] += 1
+
+    def bfp_shared_exponent_averages(self):
+        averages = []
+        for name, stat in sorted(self._bfp_shared_exponent_stats.items()):
+            count = stat["count"]
+            mean = stat["sum"] / count if count else float("nan")
+            averages.append(
+                {
+                    "name": name,
+                    "mean": mean,
+                    "count": count,
+                    "calls": stat["calls"],
+                }
+            )
+        return averages
