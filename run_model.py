@@ -54,6 +54,16 @@ def parse_args():
         action="store_true",
         help="Print average shared exponent for each BFP application location.",
     )
+    parser.add_argument("--disable_bfp_lm_head", action="store_true")
+    parser.add_argument("--disable_bfp_down_proj", action="store_true")
+    parser.add_argument("--disable_bfp_gate_proj", action="store_true")
+    parser.add_argument("--disable_bfp_up_proj", action="store_true")
+    parser.add_argument("--disable_bfp_k_proj", action="store_true")
+    parser.add_argument("--disable_bfp_o_proj", action="store_true")
+    parser.add_argument("--disable_bfp_q_proj", action="store_true")
+    parser.add_argument("--disable_bfp_qk_matmul_key", action="store_true")
+    parser.add_argument("--disable_bfp_qk_matmul_query", action="store_true")
+    parser.add_argument("--disable_bfp_v_proj", action="store_true")
     return parser.parse_args()
 
 
@@ -86,6 +96,26 @@ def _model_dir_name(model_id: str) -> str:
     return model_id.replace("/", "_")
 
 
+def _disabled_bfp_positions(args) -> set[str]:
+    disabled = set()
+    flag_to_position = {
+        "disable_bfp_lm_head": ("lm_head.input",),
+        "disable_bfp_down_proj": ("mlp.down_proj.input", "fc2.input"),
+        "disable_bfp_gate_proj": ("mlp.gate_proj.input",),
+        "disable_bfp_up_proj": ("mlp.up_proj.input", "fc1.input"),
+        "disable_bfp_k_proj": ("self_attn.k_proj.input",),
+        "disable_bfp_o_proj": ("self_attn.o_proj.input", "self_attn.out_proj.input"),
+        "disable_bfp_q_proj": ("self_attn.q_proj.input",),
+        "disable_bfp_qk_matmul_key": ("self_attn.qk_matmul.key",),
+        "disable_bfp_qk_matmul_query": ("self_attn.qk_matmul.query",),
+        "disable_bfp_v_proj": ("self_attn.v_proj.input",),
+    }
+    for flag, positions in flag_to_position.items():
+        if getattr(args, flag):
+            disabled.update(positions)
+    return disabled
+
+
 def _build_hook(args, model_dir: str) -> Hook:
     hook = Hook()
     hook.bfp = args.bfp
@@ -100,6 +130,7 @@ def _build_hook(args, model_dir: str) -> Hook:
     hook.weight_bfp_bits = args.weight_bfp_bits
     hook.weight_bfp_block_size = args.weight_bfp_block_size
     hook.bfp_shared_exponent_stats = args.bfp_exponent_stats
+    hook.disabled_bfp_positions = _disabled_bfp_positions(args)
     hook.online_rotate = args.online_rotate
     hook.orth_group_size = args.bfp_block_size
     hook.model_dir = model_dir

@@ -22,6 +22,10 @@ class Hook:
     def __init__(self):
         self.bfp_shared_exponent_stats = False
         self._bfp_shared_exponent_stats = {}
+        self.disabled_bfp_positions = set()
+
+    def is_bfp_enabled_for_position(self, name):
+        return self._bfp_position_name(name) not in self.disabled_bfp_positions
 
     def record_bfp_shared_exponent(self, name, shared_exp):
         if not self.bfp_shared_exponent_stats:

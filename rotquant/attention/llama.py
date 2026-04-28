@@ -61,16 +61,20 @@ def patch_llama_attention(attn_module, R_head, layer_idx: int, hook) -> None:
 
         if hook.bfp:
             qk_bits = _qk_bfp_bits(hook)
-            query_states = bfp_quantize_activation(
-                query_states, hook.bfp_block_size, qk_bits,
-                stat_hook=hook,
-                stat_name=f"model.layers.{layer_idx}.self_attn.qk_matmul.query",
-            )
-            key_states = bfp_quantize_activation(
-                key_states, hook.bfp_block_size, qk_bits,
-                stat_hook=hook,
-                stat_name=f"model.layers.{layer_idx}.self_attn.qk_matmul.key",
-            )
+            query_stat_name = f"model.layers.{layer_idx}.self_attn.qk_matmul.query"
+            key_stat_name = f"model.layers.{layer_idx}.self_attn.qk_matmul.key"
+            if hook.is_bfp_enabled_for_position(query_stat_name):
+                query_states = bfp_quantize_activation(
+                    query_states, hook.bfp_block_size, qk_bits,
+                    stat_hook=hook,
+                    stat_name=query_stat_name,
+                )
+            if hook.is_bfp_enabled_for_position(key_stat_name):
+                key_states = bfp_quantize_activation(
+                    key_states, hook.bfp_block_size, qk_bits,
+                    stat_hook=hook,
+                    stat_name=key_stat_name,
+                )
 
         if attention_mask is not None and attention_mask.size() != (bsz, 1, q_len, kv_seq_len):
             raise ValueError(
