@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from pathlib import Path
+
 import torch
 import torch.nn as nn
 from tqdm import tqdm
@@ -7,10 +9,24 @@ from tqdm import tqdm
 from utils import bfp_quantize_activation
 
 
+RECONSTRUCTION_ORDER = (
+    "down_proj",
+    "o_proj",
+    "q_proj",
+    "k_proj",
+    "v_proj",
+    "up_proj",
+    "gate_proj",
+    "lm_head",
+)
+
+
 def _linear_bfp_bits(linear: nn.Linear, hook) -> int:
     category = getattr(linear, "_spinkv_bfp_category", None)
     override = {
+        "qkv": getattr(hook, "bfp_qkv_bits", None),
         "o": getattr(hook, "bfp_o_bits", None),
+        "up_gate": getattr(hook, "bfp_up_gate_bits", None),
         "down": getattr(hook, "bfp_down_bits", None),
     }.get(category, None)
     return getattr(hook, "bfp_bits", 8) if override is None else override
@@ -31,26 +47,50 @@ def _calibration_input_ids(tokenizer, nsamples: int, seq_len: int, device: str):
 
 
 def _target_linears(model, hook):
+    for _, targets in reconstruction_targets_by_group(model, hook, groups=("down_proj", "o_proj")):
+        yield from targets
+
+
+def reconstruction_targets_by_group(model, hook, groups=None):
+    requested = tuple(groups or RECONSTRUCTION_ORDER)
+    targets_by_group = {group: [] for group in requested}
+
+    def add(group, name, linear):
+        if group not in targets_by_group:
+            return
+        if hook.is_bfp_enabled_for_position(f"{name}.input"):
+            targets_by_group[group].append((name, linear))
+
     if model.model_type == "llama2":
         for layer_idx, layer in enumerate(model.model.layers):
-            targets = (
-                (f"model.layers.{layer_idx}.self_attn.o_proj", layer.self_attn.o_proj),
-                (f"model.layers.{layer_idx}.mlp.down_proj", layer.mlp.down_proj),
-            )
-            for name, linear in targets:
-                if hook.is_bfp_enabled_for_position(f"{name}.input"):
-                    yield name, linear
+            prefix = f"model.layers.{layer_idx}"
+            attn, mlp = layer.self_attn, layer.mlp
+            add("q_proj", f"{prefix}.self_attn.q_proj", attn.q_proj)
+            add("k_proj", f"{prefix}.self_attn.k_proj", attn.k_proj)
+            add("v_proj", f"{prefix}.self_attn.v_proj", attn.v_proj)
+            add("o_proj", f"{prefix}.self_attn.o_proj", attn.o_proj)
+            add("gate_proj", f"{prefix}.mlp.gate_proj", mlp.gate_proj)
+            add("up_proj", f"{prefix}.mlp.up_proj", mlp.up_proj)
+            add("down_proj", f"{prefix}.mlp.down_proj", mlp.down_proj)
+        add("lm_head", "lm_head", model.lm_head)
     elif model.model_type == "opt":
         for layer_idx, layer in enumerate(model.model.decoder.layers):
-            targets = (
-                (f"model.decoder.layers.{layer_idx}.self_attn.out_proj", layer.self_attn.out_proj),
-                (f"model.decoder.layers.{layer_idx}.fc2", layer.fc2),
-            )
-            for name, linear in targets:
-                if hook.is_bfp_enabled_for_position(f"{name}.input"):
-                    yield name, linear
+            prefix = f"model.decoder.layers.{layer_idx}"
+            attn = layer.self_attn
+            add("q_proj", f"{prefix}.self_attn.q_proj", attn.q_proj)
+            add("k_proj", f"{prefix}.self_attn.k_proj", attn.k_proj)
+            add("v_proj", f"{prefix}.self_attn.v_proj", attn.v_proj)
+            add("o_proj", f"{prefix}.self_attn.out_proj", attn.out_proj)
+            add("up_proj", f"{prefix}.fc1", layer.fc1)
+            add("down_proj", f"{prefix}.fc2", layer.fc2)
+        add("lm_head", "lm_head", model.lm_head)
     else:
         raise ValueError(f"Unsupported model_type: {model.model_type}")
+
+    for group in requested:
+        targets = targets_by_group.get(group, [])
+        if targets:
+            yield group, targets
 
 
 def reconstructed_weight_state(model, hook):
@@ -66,6 +106,10 @@ def save_reconstructed_weights(path: str, model, hook, metadata=None) -> None:
         "metadata": metadata or {},
     }
     torch.save(state, path)
+
+
+def save_reconstructed_weight_state(path: str, weights, metadata=None) -> None:
+    torch.save({"weights": weights, "metadata": metadata or {}}, path)
 
 
 def load_reconstructed_weights(model, path: str, strict: bool = True) -> None:
@@ -87,12 +131,27 @@ def load_reconstructed_weights(model, path: str, strict: bool = True) -> None:
                 f"Shape mismatch for {name}: model has {tuple(module.weight.shape)}, "
                 f"checkpoint has {tuple(weight.shape)}"
             )
+        if name == "lm_head":
+            module.weight = nn.Parameter(module.weight.data.clone())
         module.weight.data.copy_(weight.to(device=module.weight.device, dtype=module.weight.dtype))
         loaded += 1
 
     if strict and loaded != len(weights):
         raise RuntimeError(f"Loaded {loaded} of {len(weights)} reconstructed weights.")
     print(f"Loaded {loaded} reconstructed weights from {path}")
+
+
+def load_reconstructed_weight_path(model, path: str, strict: bool = True) -> None:
+    recon_path = Path(path)
+    if recon_path.is_dir():
+        files = sorted(recon_path.glob("recon_*.pt"))
+        if strict and not files:
+            raise FileNotFoundError(f"No recon_*.pt files found in {path}")
+        for file in files:
+            load_reconstructed_weights(model, str(file), strict=strict)
+        return
+
+    load_reconstructed_weights(model, path, strict=strict)
 
 
 @torch.no_grad()
@@ -135,6 +194,79 @@ def _accumulate_linear_reconstruction(
         handle.remove()
 
     return gram, rhs
+
+
+@torch.no_grad()
+def reconstruct_linear_weight(
+    model,
+    input_ids: torch.Tensor,
+    name: str,
+    linear: nn.Linear,
+    hook,
+    ridge: float,
+    blend: float,
+    row_chunk: int,
+):
+    gram, rhs = _accumulate_linear_reconstruction(
+        model, input_ids, linear, hook, row_chunk
+    )
+    damp = ridge * gram.diagonal().mean().clamp(min=1e-8)
+    gram.diagonal().add_(damp)
+
+    try:
+        chol = torch.linalg.cholesky(gram)
+        solution = torch.cholesky_solve(rhs, chol)
+    except torch.linalg.LinAlgError:
+        solution = torch.linalg.solve(gram, rhs)
+
+    new_weight = solution.T.to(dtype=linear.weight.dtype)
+    if blend < 1.0:
+        new_weight = torch.lerp(linear.weight.data, new_weight, blend)
+
+    result = new_weight.detach().cpu()
+    del gram, rhs, solution, new_weight
+    if linear.weight.is_cuda:
+        torch.cuda.empty_cache()
+    return name, result
+
+
+@torch.no_grad()
+def reconstruct_weight_groups(
+    model,
+    tokenizer,
+    hook,
+    device: str,
+    groups=None,
+    nsamples: int = 128,
+    seq_len: int = 2048,
+    ridge: float = 1e-4,
+    blend: float = 1.0,
+    row_chunk: int = 2048,
+):
+    input_ids = _calibration_input_ids(tokenizer, nsamples, seq_len, device)
+    grouped_targets = list(reconstruction_targets_by_group(model, hook, groups=groups))
+    if not grouped_targets:
+        print("No BFP reconstruction targets found.")
+        return {}
+
+    reconstructed = {}
+    for group, targets in grouped_targets:
+        print(f"Reconstructing {group}: {len(targets)} modules")
+        group_weights = {}
+        for name, linear in tqdm(targets):
+            target_name, weight = reconstruct_linear_weight(
+                model,
+                input_ids,
+                name,
+                linear,
+                hook,
+                ridge=ridge,
+                blend=blend,
+                row_chunk=row_chunk,
+            )
+            group_weights[target_name] = weight
+        reconstructed[group] = group_weights
+    return reconstructed
 
 
 @torch.no_grad()

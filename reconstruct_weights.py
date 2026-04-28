@@ -1,18 +1,20 @@
 import argparse
+from pathlib import Path
 
 import torch
 from transformers import AutoModelForCausalLM, AutoTokenizer, set_seed
 
 from rotquant import Hook, prepare_model_for_rotate
 from rotquant.reconstruction import (
-    reconstruct_down_o_weights,
-    save_reconstructed_weights,
+    RECONSTRUCTION_ORDER,
+    reconstruct_weight_groups,
+    save_reconstructed_weight_state,
 )
 
 
 def parse_args():
     parser = argparse.ArgumentParser(
-        description="Reconstruct down/o projection weights for BFP activations."
+        description="Reconstruct Linear weights for BFP activations."
     )
     parser.add_argument(
         "--model",
@@ -20,13 +22,22 @@ def parse_args():
         default="meta-llama/Llama-2-7b-hf",
         help="HF model id (for example: meta-llama/Llama-2-7b-hf, facebook/opt-1.3b)",
     )
-    parser.add_argument("--output", type=str, required=True)
+    parser.add_argument("--output_dir", type=str, default=None)
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--device", type=str, default="cuda")
     parser.add_argument("--bfp_bits", type=int, default=8)
     parser.add_argument("--bfp_block_size", type=int, default=128)
+    parser.add_argument("--bfp_qkv_bits", type=int, default=None)
     parser.add_argument("--bfp_o_bits", type=int, default=None)
+    parser.add_argument("--bfp_up_gate_bits", type=int, default=None)
     parser.add_argument("--bfp_down_bits", type=int, default=None)
+    parser.add_argument(
+        "--groups",
+        nargs="+",
+        default=list(RECONSTRUCTION_ORDER),
+        choices=list(RECONSTRUCTION_ORDER),
+        help="Module groups to reconstruct, in the order provided.",
+    )
     parser.add_argument("--calib_samples", type=int, default=128)
     parser.add_argument("--calib_seq_len", type=int, default=2048)
     parser.add_argument("--ridge", type=float, default=1e-4)
@@ -65,9 +76,25 @@ def _build_hook(args) -> Hook:
     hook.bfp = True
     hook.bfp_bits = args.bfp_bits
     hook.bfp_block_size = args.bfp_block_size
+    hook.bfp_qkv_bits = args.bfp_qkv_bits
     hook.bfp_o_bits = args.bfp_o_bits
+    hook.bfp_up_gate_bits = args.bfp_up_gate_bits
     hook.bfp_down_bits = args.bfp_down_bits
     return hook
+
+
+def _model_dir_name(model_id: str) -> str:
+    return model_id.replace("/", "_")
+
+
+def _output_dir(args) -> Path:
+    if args.output_dir is not None:
+        return Path(args.output_dir)
+    return Path("recon") / _model_dir_name(args.model)
+
+
+def _bits_label(args) -> str:
+    return f"bfp{args.bfp_bits}"
 
 
 def main():
@@ -81,34 +108,46 @@ def main():
     print("Preparing fused pre-rotation model ...")
     prepare_model_for_rotate(model)
 
-    reconstruct_down_o_weights(
+    reconstructed = reconstruct_weight_groups(
         model,
         tokenizer,
         hook,
         args.device,
+        groups=args.groups,
         nsamples=args.calib_samples,
         seq_len=args.calib_seq_len,
         ridge=args.ridge,
         blend=args.blend,
         row_chunk=args.row_chunk,
     )
-    save_reconstructed_weights(
-        args.output,
-        model,
-        hook,
-        metadata={
-            "model": args.model,
-            "bfp_bits": args.bfp_bits,
-            "bfp_block_size": args.bfp_block_size,
-            "bfp_o_bits": args.bfp_o_bits,
-            "bfp_down_bits": args.bfp_down_bits,
-            "calib_samples": args.calib_samples,
-            "calib_seq_len": args.calib_seq_len,
-            "ridge": args.ridge,
-            "blend": args.blend,
-        },
-    )
-    print(f"Saved reconstructed weights to {args.output}")
+
+    output_dir = _output_dir(args)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    for group, weights in reconstructed.items():
+        path = output_dir / f"recon_{group}_{_bits_label(args)}.pt"
+        save_reconstructed_weight_state(
+            str(path),
+            weights,
+            metadata={
+                "group": group,
+                "groups": args.groups,
+                "model": args.model,
+                "bfp_bits": args.bfp_bits,
+                "bfp_block_size": args.bfp_block_size,
+                "bfp_qkv_bits": args.bfp_qkv_bits,
+                "bfp_o_bits": args.bfp_o_bits,
+                "bfp_up_gate_bits": args.bfp_up_gate_bits,
+                "bfp_down_bits": args.bfp_down_bits,
+                "calib_samples": args.calib_samples,
+                "calib_seq_len": args.calib_seq_len,
+                "ridge": args.ridge,
+                "blend": args.blend,
+            },
+        )
+        print(f"Saved {group} reconstructed weights to {path}")
+
+    if not reconstructed:
+        print("No reconstructed weights were saved.")
 
 
 if __name__ == "__main__":

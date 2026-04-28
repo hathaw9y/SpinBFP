@@ -4,7 +4,7 @@ import torch
 from transformers import AutoModelForCausalLM, AutoTokenizer, set_seed
 
 from rotquant import Hook, apply_rotate
-from rotquant.reconstruction import load_reconstructed_weights
+from rotquant.reconstruction import load_reconstructed_weight_path
 from utils import eval_ppl_wikitext
 
 
@@ -69,7 +69,7 @@ def parse_args():
         "--load_reconstructed_weights",
         type=str,
         default=None,
-        help="Load reconstructed down/o projection weights before rotation.",
+        help="Load reconstructed weights before rotation. Accepts a .pt file or a directory of recon_*.pt files.",
     )
     return parser.parse_args()
 
@@ -253,7 +253,7 @@ def main():
     def pre_rotate_callback():
         if args.load_reconstructed_weights is None:
             return
-        load_reconstructed_weights(model, args.load_reconstructed_weights)
+        load_reconstructed_weight_path(model, args.load_reconstructed_weights)
 
     apply_rotate(
         model,
