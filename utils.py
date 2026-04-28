@@ -20,8 +20,18 @@ def convert2fp16(
     mantissa_shifted = mantissa >> shift
 
     truncate_bits = 11 - mbits + 1
-    round_bit = (mantissa_shifted >> (truncate_bits - 1)) & 1
-    mantissa_truncated = (mantissa_shifted >> truncate_bits) + round_bit
+    mantissa_truncated = mantissa_shifted >> truncate_bits
+    guard_bit = (mantissa_shifted >> (truncate_bits - 1)) & 1
+    if truncate_bits > 1:
+        round_bit = (mantissa_shifted >> (truncate_bits - 2)) & 1
+        sticky_mask = (1 << (truncate_bits - 2)) - 1
+        sticky_bit = (mantissa_shifted & sticky_mask) != 0
+    else:
+        round_bit = torch.zeros_like(guard_bit)
+        sticky_bit = torch.zeros_like(guard_bit, dtype=torch.bool)
+    lsb_bit = mantissa_truncated & 1
+    round_up = guard_bit.bool() & (round_bit.bool() | sticky_bit | lsb_bit.bool())
+    mantissa_truncated = mantissa_truncated + round_up.to(mantissa_truncated.dtype)
 
     max_mantissa = (1 << (mbits - 1)) - 1
     mantissa_truncated = mantissa_truncated.clamp(max=max_mantissa)
