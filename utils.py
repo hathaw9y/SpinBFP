@@ -22,12 +22,7 @@ def convert2fp16(
     truncate_bits = 11 - mbits + 1
     round_bit = (mantissa_shifted >> (truncate_bits - 1)) & 1
     mantissa_truncated = (mantissa_shifted >> truncate_bits) + round_bit
-    if mbits == 5:
-        mantissa_truncated = torch.where(
-            mantissa_truncated == 1,
-            torch.full_like(mantissa_truncated, 2),
-            mantissa_truncated,
-        )
+
     max_mantissa = (1 << (mbits - 1)) - 1
     mantissa_truncated = mantissa_truncated.clamp(max=max_mantissa)
 
