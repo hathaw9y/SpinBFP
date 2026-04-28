@@ -124,6 +124,19 @@ def _print_bfp_shared_exponent_stats(hook) -> None:
             f"{item['calls']:8d}"
         )
 
+    position_averages = hook.bfp_shared_exponent_position_averages()
+    if position_averages:
+        print("\n--- BFP shared exponent stats by position ---")
+        print(f"{'position':32s} {'mean':>10s} {'variance':>10s} {'blocks':>12s} {'calls':>8s}")
+        for item in position_averages:
+            print(
+                f"{item['name']:32s} "
+                f"{item['mean']:10.4f} "
+                f"{item['variance']:10.4f} "
+                f"{item['count']:12d} "
+                f"{item['calls']:8d}"
+            )
+
     layer_averages = hook.bfp_shared_exponent_layer_averages()
     if not layer_averages:
         return

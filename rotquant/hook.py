@@ -75,6 +75,27 @@ class Hook:
             )
         ]
 
+    def bfp_shared_exponent_position_averages(self):
+        position_stats = {}
+        for name, stat in self._bfp_shared_exponent_stats.items():
+            position_name = self._bfp_position_name(name)
+            position_stat = position_stats.setdefault(
+                position_name,
+                {"sum": 0.0, "sum_sq": 0.0, "count": 0, "calls": 0},
+            )
+            position_stat["sum"] += stat["sum"]
+            position_stat["sum_sq"] += stat["sum_sq"]
+            position_stat["count"] += stat["count"]
+            position_stat["calls"] += stat["calls"]
+
+        return [
+            self._bfp_stat_row(name, stat)
+            for name, stat in sorted(
+                position_stats.items(),
+                key=lambda item: self._bfp_location_sort_key(item[0]),
+            )
+        ]
+
     @staticmethod
     def _bfp_stat_row(name, stat):
         count = stat["count"]
@@ -95,6 +116,10 @@ class Hook:
         if match is None:
             return None
         return int(match.group(1))
+
+    @staticmethod
+    def _bfp_position_name(name):
+        return re.sub(r"^.*\.layers\.\d+\.", "", name, count=1)
 
     @classmethod
     def _bfp_location_sort_key(cls, name):
