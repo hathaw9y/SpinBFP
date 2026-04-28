@@ -136,6 +136,9 @@ class Hook:
     def bfp_shared_exponent_position_averages(self):
         return self._bfp_position_averages(self._bfp_shared_exponent_stats)
 
+    def bfp_shared_exponent_total_average(self):
+        return self._bfp_total_average(self._bfp_shared_exponent_stats, "total")
+
     def bfp_shift_averages(self):
         return self._bfp_location_averages(self._bfp_shift_stats)
 
@@ -145,6 +148,9 @@ class Hook:
     def bfp_shift_position_averages(self):
         return self._bfp_position_averages(self._bfp_shift_stats)
 
+    def bfp_shift_total_average(self):
+        return self._bfp_total_average(self._bfp_shift_stats, "total")
+
     def bfp_rate_averages(self):
         return self._bfp_rate_location_averages(self._bfp_rate_stats)
 
@@ -153,6 +159,9 @@ class Hook:
 
     def bfp_rate_position_averages(self):
         return self._bfp_rate_position_averages(self._bfp_rate_stats)
+
+    def bfp_rate_total_average(self):
+        return self._bfp_rate_total_average(self._bfp_rate_stats, "total")
 
     def _bfp_location_averages(self, stats):
         averages = []
@@ -227,6 +236,28 @@ class Hook:
             )
         ]
 
+    def _bfp_total_average(self, stats, name):
+        if not stats:
+            return []
+
+        total_stat = {
+            "sum": 0.0,
+            "sum_sq": 0.0,
+            "count": 0,
+            "calls": 0,
+            "min": float("inf"),
+            "max": float("-inf"),
+        }
+        for stat in stats.values():
+            total_stat["sum"] += stat["sum"]
+            total_stat["sum_sq"] += stat["sum_sq"]
+            total_stat["count"] += stat["count"]
+            total_stat["calls"] += stat["calls"]
+            total_stat["min"] = min(total_stat["min"], stat["min"])
+            total_stat["max"] = max(total_stat["max"], stat["max"])
+
+        return [self._bfp_stat_row(name, total_stat)]
+
     def _bfp_rate_location_averages(self, stats):
         return [
             self._bfp_rate_row(name, stat)
@@ -285,6 +316,21 @@ class Hook:
                 key=lambda item: self._bfp_location_sort_key(item[0]),
             )
         ]
+
+    def _bfp_rate_total_average(self, stats, name):
+        if not stats:
+            return []
+
+        total_stat = {
+            "count": 0,
+            "zero_mantissa": 0,
+            "shift_ge_mbits_minus1": 0,
+            "shift_ge_mbits": 0,
+        }
+        for stat in stats.values():
+            self._merge_bfp_rate_stat(total_stat, stat)
+
+        return [self._bfp_rate_row(name, total_stat)]
 
     @staticmethod
     def _merge_bfp_rate_stat(target, source):

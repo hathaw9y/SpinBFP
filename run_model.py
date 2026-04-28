@@ -190,6 +190,13 @@ def _print_bfp_shared_exponent_stats(hook) -> None:
         hook.bfp_rate_layer_averages(),
         12,
     )
+    _print_bfp_stat_table(
+        "BFP shared exponent stats total",
+        "scope",
+        hook.bfp_shared_exponent_total_average(),
+        hook.bfp_rate_total_average(),
+        12,
+    )
     _print_bfp_shift_stats(hook)
 
 
@@ -213,6 +220,13 @@ def _print_bfp_shift_stats(hook) -> None:
         "layer",
         hook.bfp_shift_layer_averages(),
         hook.bfp_rate_layer_averages(),
+        12,
+    )
+    _print_bfp_stat_table(
+        "BFP bit shift stats total",
+        "scope",
+        hook.bfp_shift_total_average(),
+        hook.bfp_rate_total_average(),
         12,
     )
 
