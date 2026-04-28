@@ -109,16 +109,32 @@ def _build_hook(args, model_dir: str) -> Hook:
 def _print_bfp_shared_exponent_stats(hook) -> None:
     averages = hook.bfp_shared_exponent_averages()
     if not averages:
-        print("\n--- BFP shared exponent averages ---")
+        print("\n--- BFP shared exponent stats ---")
         print("No BFP shared exponent stats were collected.")
         return
 
-    print("\n--- BFP shared exponent averages ---")
-    print(f"{'location':72s} {'mean':>10s} {'blocks':>12s} {'calls':>8s}")
+    print("\n--- BFP shared exponent stats ---")
+    print(f"{'location':72s} {'mean':>10s} {'variance':>10s} {'blocks':>12s} {'calls':>8s}")
     for item in averages:
         print(
             f"{item['name']:72s} "
             f"{item['mean']:10.4f} "
+            f"{item['variance']:10.4f} "
+            f"{item['count']:12d} "
+            f"{item['calls']:8d}"
+        )
+
+    layer_averages = hook.bfp_shared_exponent_layer_averages()
+    if not layer_averages:
+        return
+
+    print("\n--- BFP shared exponent stats by layer ---")
+    print(f"{'layer':12s} {'mean':>10s} {'variance':>10s} {'blocks':>12s} {'calls':>8s}")
+    for item in layer_averages:
+        print(
+            f"{item['name']:12s} "
+            f"{item['mean']:10.4f} "
+            f"{item['variance']:10.4f} "
             f"{item['count']:12d} "
             f"{item['calls']:8d}"
         )
