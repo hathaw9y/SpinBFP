@@ -48,6 +48,11 @@ def parse_args():
         help="Experimental: apply BFP mantissa rounding only when shared exponent <= 16.",
     )
     parser.add_argument(
+        "--bfp_strict_round_exp_ge17",
+        action="store_true",
+        help="Experimental: for shared exponent >= 17, round only when the top two dropped bits are 11.",
+    )
+    parser.add_argument(
         "--weight_bfp",
         action="store_true",
         help="Apply BFP to linear weights in the W.T layout used by linear inputs.",
@@ -132,6 +137,7 @@ def _build_hook(args, model_dir: str) -> Hook:
     hook.bfp_down_bits = args.bfp_down_bits
     hook.bfp_qk_bits = args.bfp_qk_bits
     hook.bfp_round_only_exp_le16 = args.bfp_round_only_exp_le16
+    hook.bfp_strict_round_exp_ge17 = args.bfp_strict_round_exp_ge17
     hook.weight_bfp = args.weight_bfp
     hook.weight_bfp_bits = args.weight_bfp_bits
     hook.weight_bfp_block_size = args.weight_bfp_block_size

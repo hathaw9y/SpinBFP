@@ -21,6 +21,7 @@ class Hook:
 
     def __init__(self):
         self.bfp_round_only_exp_le16 = False
+        self.bfp_strict_round_exp_ge17 = False
         self.bfp_shared_exponent_stats = False
         self._bfp_shared_exponent_stats = {}
         self.disabled_bfp_positions = set()
