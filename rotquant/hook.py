@@ -20,10 +20,9 @@ class Hook:
     model_dir = None
 
     def __init__(self):
-        self.bfp_round_only_exp_le16 = False
-        self.bfp_strict_round_exp_ge17 = False
         self.bfp_shared_exponent_stats = False
         self._bfp_shared_exponent_stats = {}
+        self._bfp_shift_stats = {}
         self.disabled_bfp_positions = set()
 
     def is_bfp_enabled_for_position(self, name):
@@ -33,12 +32,22 @@ class Hook:
         if not self.bfp_shared_exponent_stats:
             return
 
-        count = shared_exp.numel()
+        self._record_bfp_stat(self._bfp_shared_exponent_stats, name, shared_exp)
+
+    def record_bfp_shift(self, name, shift):
+        if not self.bfp_shared_exponent_stats:
+            return
+
+        self._record_bfp_stat(self._bfp_shift_stats, name, shift)
+
+    @staticmethod
+    def _record_bfp_stat(stats, name, values):
+        count = values.numel()
         if count == 0:
             return
 
-        shared_exp_float = shared_exp.detach().float()
-        stat = self._bfp_shared_exponent_stats.setdefault(
+        values_float = values.detach().float()
+        stat = stats.setdefault(
             name,
             {
                 "sum": 0.0,
@@ -49,12 +58,12 @@ class Hook:
                 "max": float("-inf"),
             },
         )
-        stat["sum"] += shared_exp_float.sum().item()
-        stat["sum_sq"] += shared_exp_float.square().sum().item()
+        stat["sum"] += values_float.sum().item()
+        stat["sum_sq"] += values_float.square().sum().item()
         stat["count"] += count
         stat["calls"] += 1
-        stat["min"] = min(stat["min"], shared_exp_float.min().item())
-        stat["max"] = max(stat["max"], shared_exp_float.max().item())
+        stat["min"] = min(stat["min"], values_float.min().item())
+        stat["max"] = max(stat["max"], values_float.max().item())
 
     def bfp_shared_exponent_averages(self):
         averages = []
@@ -100,8 +109,63 @@ class Hook:
         ]
 
     def bfp_shared_exponent_position_averages(self):
+        return self._bfp_position_averages(self._bfp_shared_exponent_stats)
+
+    def bfp_shift_averages(self):
+        return self._bfp_location_averages(self._bfp_shift_stats)
+
+    def bfp_shift_layer_averages(self):
+        return self._bfp_layer_averages(self._bfp_shift_stats)
+
+    def bfp_shift_position_averages(self):
+        return self._bfp_position_averages(self._bfp_shift_stats)
+
+    def _bfp_location_averages(self, stats):
+        averages = []
+        for name, stat in sorted(
+            stats.items(),
+            key=lambda item: self._bfp_location_sort_key(item[0]),
+        ):
+            averages.append(self._bfp_stat_row(name, stat))
+        return averages
+
+    def _bfp_layer_averages(self, stats):
+        layer_stats = {}
+        for name, stat in stats.items():
+            layer_idx = self._bfp_layer_idx(name)
+            if layer_idx is None:
+                continue
+
+            layer_name = f"layer.{layer_idx}"
+            layer_stat = layer_stats.setdefault(
+                layer_name,
+                {
+                    "sum": 0.0,
+                    "sum_sq": 0.0,
+                    "count": 0,
+                    "calls": 0,
+                    "min": float("inf"),
+                    "max": float("-inf"),
+                },
+            )
+            layer_stat["sum"] += stat["sum"]
+            layer_stat["sum_sq"] += stat["sum_sq"]
+            layer_stat["count"] += stat["count"]
+            layer_stat["calls"] += stat["calls"]
+            layer_stat["min"] = min(layer_stat["min"], stat["min"])
+            layer_stat["max"] = max(layer_stat["max"], stat["max"])
+
+        return [
+            self._bfp_stat_row(name, stat)
+            for name, stat in sorted(
+                layer_stats.items(),
+                key=lambda item: self._bfp_layer_sort_key(item[0]),
+            )
+        ]
+
+    def _bfp_position_averages(self, stats):
         position_stats = {}
-        for name, stat in self._bfp_shared_exponent_stats.items():
+        for name, stat in stats.items():
             position_name = self._bfp_position_name(name)
             position_stat = position_stats.setdefault(
                 position_name,

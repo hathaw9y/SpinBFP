@@ -6,9 +6,7 @@ def convert2fp16(
     x: torch.Tensor,
     block_size: int = 128,
     mbits: int = 8,
-    round_only_exp_le16: bool = False,
-    strict_round_exp_ge17: bool = False,
-) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     shape = x.shape
     flat = x.reshape(*x.shape[:-1], -1, block_size).half()
 
@@ -23,15 +21,6 @@ def convert2fp16(
 
     truncate_bits = 11 - mbits + 1
     round_bit = (mantissa_shifted >> (truncate_bits - 1)) & 1
-    if strict_round_exp_ge17:
-        if truncate_bits > 1:
-            next_round_bit = (mantissa_shifted >> (truncate_bits - 2)) & 1
-        else:
-            next_round_bit = torch.zeros_like(round_bit)
-        strict_round_bit = round_bit & next_round_bit
-        round_bit = torch.where(shared_exp >= 17, strict_round_bit, round_bit)
-    if round_only_exp_le16:
-        round_bit = round_bit * (shared_exp <= 16)
     mantissa_truncated = (mantissa_shifted >> truncate_bits) + round_bit
 
     max_mantissa = (1 << (mbits - 1)) - 1
@@ -53,6 +42,7 @@ def convert2fp16(
         mantissa_signed.reshape(shape),
         real_exp.reshape(shape),
         shared_exp,
+        shift,
     )
 
 
@@ -65,15 +55,14 @@ def bfp_quantize_activation(
 ) -> torch.Tensor:
     if x.shape[-1] % block_size != 0:
         block_size = x.shape[-1]
-    restored, _, _, shared_exp = convert2fp16(
+    restored, _, _, shared_exp, shift = convert2fp16(
         x,
         block_size=block_size,
         mbits=mbits,
-        round_only_exp_le16=getattr(stat_hook, "bfp_round_only_exp_le16", False),
-        strict_round_exp_ge17=getattr(stat_hook, "bfp_strict_round_exp_ge17", False),
     )
     if stat_hook is not None and stat_name is not None:
         stat_hook.record_bfp_shared_exponent(stat_name, shared_exp)
+        stat_hook.record_bfp_shift(stat_name, shift)
     return restored.to(x.dtype)
 
 
@@ -87,15 +76,14 @@ def bfp_quantize_weight_transpose(
     wt = w.T.contiguous()
     if wt.shape[-1] % block_size != 0:
         block_size = wt.shape[-1]
-    restored, _, _, shared_exp = convert2fp16(
+    restored, _, _, shared_exp, shift = convert2fp16(
         wt,
         block_size=block_size,
         mbits=mbits,
-        round_only_exp_le16=getattr(stat_hook, "bfp_round_only_exp_le16", False),
-        strict_round_exp_ge17=getattr(stat_hook, "bfp_strict_round_exp_ge17", False),
     )
     if stat_hook is not None and stat_name is not None:
         stat_hook.record_bfp_shared_exponent(stat_name, shared_exp)
+        stat_hook.record_bfp_shift(stat_name, shift)
     return restored.T.contiguous().to(w.dtype)
 
 
