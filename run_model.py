@@ -43,6 +43,11 @@ def parse_args():
     parser.add_argument("--bfp_down_bits", type=int, default=None)
     parser.add_argument("--bfp_qk_bits", type=int, default=None)
     parser.add_argument(
+        "--bfp_round_only_exp_le16",
+        action="store_true",
+        help="Experimental: apply BFP mantissa rounding only when shared exponent <= 16.",
+    )
+    parser.add_argument(
         "--weight_bfp",
         action="store_true",
         help="Apply BFP to linear weights in the W.T layout used by linear inputs.",
@@ -126,6 +131,7 @@ def _build_hook(args, model_dir: str) -> Hook:
     hook.bfp_up_gate_bits = args.bfp_up_gate_bits
     hook.bfp_down_bits = args.bfp_down_bits
     hook.bfp_qk_bits = args.bfp_qk_bits
+    hook.bfp_round_only_exp_le16 = args.bfp_round_only_exp_le16
     hook.weight_bfp = args.weight_bfp
     hook.weight_bfp_bits = args.weight_bfp_bits
     hook.weight_bfp_block_size = args.weight_bfp_block_size
@@ -145,12 +151,17 @@ def _print_bfp_shared_exponent_stats(hook) -> None:
         return
 
     print("\n--- BFP shared exponent stats ---")
-    print(f"{'location':72s} {'mean':>10s} {'variance':>10s} {'blocks':>12s} {'calls':>8s}")
+    print(
+        f"{'location':72s} {'mean':>10s} {'variance':>10s} "
+        f"{'min':>6s} {'max':>6s} {'blocks':>12s} {'calls':>8s}"
+    )
     for item in averages:
         print(
             f"{item['name']:72s} "
             f"{item['mean']:10.4f} "
             f"{item['variance']:10.4f} "
+            f"{item['min']:6.0f} "
+            f"{item['max']:6.0f} "
             f"{item['count']:12d} "
             f"{item['calls']:8d}"
         )
@@ -158,12 +169,17 @@ def _print_bfp_shared_exponent_stats(hook) -> None:
     position_averages = hook.bfp_shared_exponent_position_averages()
     if position_averages:
         print("\n--- BFP shared exponent stats by position ---")
-        print(f"{'position':32s} {'mean':>10s} {'variance':>10s} {'blocks':>12s} {'calls':>8s}")
+        print(
+            f"{'position':32s} {'mean':>10s} {'variance':>10s} "
+            f"{'min':>6s} {'max':>6s} {'blocks':>12s} {'calls':>8s}"
+        )
         for item in position_averages:
             print(
                 f"{item['name']:32s} "
                 f"{item['mean']:10.4f} "
                 f"{item['variance']:10.4f} "
+                f"{item['min']:6.0f} "
+                f"{item['max']:6.0f} "
                 f"{item['count']:12d} "
                 f"{item['calls']:8d}"
             )
@@ -173,12 +189,17 @@ def _print_bfp_shared_exponent_stats(hook) -> None:
         return
 
     print("\n--- BFP shared exponent stats by layer ---")
-    print(f"{'layer':12s} {'mean':>10s} {'variance':>10s} {'blocks':>12s} {'calls':>8s}")
+    print(
+        f"{'layer':12s} {'mean':>10s} {'variance':>10s} "
+        f"{'min':>6s} {'max':>6s} {'blocks':>12s} {'calls':>8s}"
+    )
     for item in layer_averages:
         print(
             f"{item['name']:12s} "
             f"{item['mean']:10.4f} "
             f"{item['variance']:10.4f} "
+            f"{item['min']:6.0f} "
+            f"{item['max']:6.0f} "
             f"{item['count']:12d} "
             f"{item['calls']:8d}"
         )

@@ -20,6 +20,7 @@ class Hook:
     model_dir = None
 
     def __init__(self):
+        self.bfp_round_only_exp_le16 = False
         self.bfp_shared_exponent_stats = False
         self._bfp_shared_exponent_stats = {}
         self.disabled_bfp_positions = set()
@@ -38,12 +39,21 @@ class Hook:
         shared_exp_float = shared_exp.detach().float()
         stat = self._bfp_shared_exponent_stats.setdefault(
             name,
-            {"sum": 0.0, "sum_sq": 0.0, "count": 0, "calls": 0},
+            {
+                "sum": 0.0,
+                "sum_sq": 0.0,
+                "count": 0,
+                "calls": 0,
+                "min": float("inf"),
+                "max": float("-inf"),
+            },
         )
         stat["sum"] += shared_exp_float.sum().item()
         stat["sum_sq"] += shared_exp_float.square().sum().item()
         stat["count"] += count
         stat["calls"] += 1
+        stat["min"] = min(stat["min"], shared_exp_float.min().item())
+        stat["max"] = max(stat["max"], shared_exp_float.max().item())
 
     def bfp_shared_exponent_averages(self):
         averages = []
@@ -64,12 +74,21 @@ class Hook:
             layer_name = f"layer.{layer_idx}"
             layer_stat = layer_stats.setdefault(
                 layer_name,
-                {"sum": 0.0, "sum_sq": 0.0, "count": 0, "calls": 0},
+                {
+                    "sum": 0.0,
+                    "sum_sq": 0.0,
+                    "count": 0,
+                    "calls": 0,
+                    "min": float("inf"),
+                    "max": float("-inf"),
+                },
             )
             layer_stat["sum"] += stat["sum"]
             layer_stat["sum_sq"] += stat["sum_sq"]
             layer_stat["count"] += stat["count"]
             layer_stat["calls"] += stat["calls"]
+            layer_stat["min"] = min(layer_stat["min"], stat["min"])
+            layer_stat["max"] = max(layer_stat["max"], stat["max"])
 
         return [
             self._bfp_stat_row(name, stat)
@@ -85,12 +104,21 @@ class Hook:
             position_name = self._bfp_position_name(name)
             position_stat = position_stats.setdefault(
                 position_name,
-                {"sum": 0.0, "sum_sq": 0.0, "count": 0, "calls": 0},
+                {
+                    "sum": 0.0,
+                    "sum_sq": 0.0,
+                    "count": 0,
+                    "calls": 0,
+                    "min": float("inf"),
+                    "max": float("-inf"),
+                },
             )
             position_stat["sum"] += stat["sum"]
             position_stat["sum_sq"] += stat["sum_sq"]
             position_stat["count"] += stat["count"]
             position_stat["calls"] += stat["calls"]
+            position_stat["min"] = min(position_stat["min"], stat["min"])
+            position_stat["max"] = max(position_stat["max"], stat["max"])
 
         return [
             self._bfp_stat_row(name, stat)
@@ -110,6 +138,8 @@ class Hook:
             "name": name,
             "mean": mean,
             "variance": variance,
+            "min": stat["min"],
+            "max": stat["max"],
             "count": count,
             "calls": stat["calls"],
         }
