@@ -69,7 +69,7 @@ def parse_args():
         "--load_reconstructed_weights",
         type=str,
         default=None,
-        help="Load reconstructed weights before rotation. Accepts a .pt file or a directory of recon_*.pt files.",
+        help="Load reconstructed weights. Accepts a .pt file or a directory containing recon_*.pt files.",
     )
     return parser.parse_args()
 
@@ -253,7 +253,16 @@ def main():
     def pre_rotate_callback():
         if args.load_reconstructed_weights is None:
             return
-        load_reconstructed_weight_path(model, args.load_reconstructed_weights)
+        load_reconstructed_weight_path(
+            model, args.load_reconstructed_weights, strict=False, stage="raw",
+        )
+
+    def post_rotate_callback():
+        if args.load_reconstructed_weights is None:
+            return
+        load_reconstructed_weight_path(
+            model, args.load_reconstructed_weights, strict=False, stage="rotate",
+        )
 
     apply_rotate(
         model,
@@ -261,6 +270,7 @@ def main():
         hook,
         rotate=rotate,
         pre_rotate_callback=pre_rotate_callback,
+        post_rotate_callback=post_rotate_callback,
     )
 
     print("\n--- PPL evaluation on WikiText-2 ---")

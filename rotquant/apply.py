@@ -157,6 +157,7 @@ def apply_rotate(
     hook,
     rotate: str | None = "hadamard",
     pre_rotate_callback=None,
+    post_rotate_callback=None,
 ) -> None:
     """
     rotate='hadamard'   : fuse_norms + Hadamard 회전 + attention patch
@@ -168,6 +169,8 @@ def apply_rotate(
 
     if rotate is None:
         _patch_attention_only(model, device, hook)
+        if post_rotate_callback is not None:
+            post_rotate_callback()
         if getattr(hook, 'weight_bfp', False):
             _apply_linear_weight_bfp(model, hook)
         if getattr(hook, 'bfp', False):
@@ -185,7 +188,12 @@ def apply_rotate(
         raise ValueError(f"Unsupported rotate: {rotate}")
 
     if getattr(hook, 'weight_bfp', False):
+        if post_rotate_callback is not None:
+            post_rotate_callback()
         _apply_linear_weight_bfp(model, hook)
+    else:
+        if post_rotate_callback is not None:
+            post_rotate_callback()
 
     if getattr(hook, 'bfp', False):
         _patch_linear_bfp(model, hook)

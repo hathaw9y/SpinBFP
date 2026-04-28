@@ -112,8 +112,21 @@ def save_reconstructed_weight_state(path: str, weights, metadata=None) -> None:
     torch.save({"weights": weights, "metadata": metadata or {}}, path)
 
 
-def load_reconstructed_weights(model, path: str, strict: bool = True) -> None:
+def _checkpoint_stage(state):
+    metadata = state.get("metadata", {})
+    return metadata.get("stage", "raw")
+
+
+def load_reconstructed_weights(
+    model,
+    path: str,
+    strict: bool = True,
+    stage: str | None = None,
+) -> int:
     state = torch.load(path, map_location="cpu")
+    if stage is not None and _checkpoint_stage(state) != stage:
+        return 0
+
     weights = state.get("weights", state)
     modules = dict(model.named_modules())
     loaded = 0
@@ -139,19 +152,30 @@ def load_reconstructed_weights(model, path: str, strict: bool = True) -> None:
     if strict and loaded != len(weights):
         raise RuntimeError(f"Loaded {loaded} of {len(weights)} reconstructed weights.")
     print(f"Loaded {loaded} reconstructed weights from {path}")
+    return loaded
 
 
-def load_reconstructed_weight_path(model, path: str, strict: bool = True) -> None:
+def load_reconstructed_weight_path(
+    model,
+    path: str,
+    strict: bool = True,
+    stage: str | None = None,
+) -> int:
     recon_path = Path(path)
     if recon_path.is_dir():
-        files = sorted(recon_path.glob("recon_*.pt"))
+        files = sorted(recon_path.glob("**/recon_*.pt"))
         if strict and not files:
             raise FileNotFoundError(f"No recon_*.pt files found in {path}")
+        loaded = 0
         for file in files:
-            load_reconstructed_weights(model, str(file), strict=strict)
-        return
+            loaded += load_reconstructed_weights(
+                model, str(file), strict=strict, stage=stage,
+            )
+        if strict and stage is not None and loaded == 0:
+            raise FileNotFoundError(f"No stage={stage} reconstructed weights found in {path}")
+        return loaded
 
-    load_reconstructed_weights(model, path, strict=strict)
+    return load_reconstructed_weights(model, path, strict=strict, stage=stage)
 
 
 @torch.no_grad()

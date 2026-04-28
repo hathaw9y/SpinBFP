@@ -4,7 +4,7 @@ from pathlib import Path
 import torch
 from transformers import AutoModelForCausalLM, AutoTokenizer, set_seed
 
-from rotquant import Hook, prepare_model_for_rotate
+from rotquant import Hook, apply_rotate, prepare_model_for_rotate
 from rotquant.reconstruction import (
     RECONSTRUCTION_ORDER,
     reconstruct_weight_groups,
@@ -25,6 +25,16 @@ def parse_args():
     parser.add_argument("--output_dir", type=str, default=None)
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--device", type=str, default="cuda")
+    parser.add_argument(
+        "--rotate",
+        action="store_true",
+        help="Reconstruct weights after applying Hadamard rotation without BFP.",
+    )
+    parser.add_argument(
+        "--online_rotate",
+        action="store_true",
+        help="Use online intermediate/QK rotation when --rotate is enabled.",
+    )
     parser.add_argument("--bfp_bits", type=int, default=8)
     parser.add_argument("--bfp_block_size", type=int, default=128)
     parser.add_argument("--bfp_qkv_bits", type=int, default=None)
@@ -80,6 +90,17 @@ def _build_hook(args) -> Hook:
     hook.bfp_o_bits = args.bfp_o_bits
     hook.bfp_up_gate_bits = args.bfp_up_gate_bits
     hook.bfp_down_bits = args.bfp_down_bits
+    hook.online_rotate = args.online_rotate
+    hook.orth_group_size = args.bfp_block_size
+    return hook
+
+
+def _build_rotate_only_hook(args) -> Hook:
+    hook = Hook()
+    hook.bfp = False
+    hook.weight_bfp = False
+    hook.online_rotate = args.online_rotate
+    hook.orth_group_size = args.bfp_block_size
     return hook
 
 
@@ -90,7 +111,8 @@ def _model_dir_name(model_id: str) -> str:
 def _output_dir(args) -> Path:
     if args.output_dir is not None:
         return Path(args.output_dir)
-    return Path("recon") / _model_dir_name(args.model)
+    stage = "rotate" if args.rotate else "raw"
+    return Path("recon") / _model_dir_name(args.model) / stage
 
 
 def _bits_label(args) -> str:
@@ -105,8 +127,18 @@ def main():
     model, tokenizer = _load_model(args.model, args.device)
     hook = _build_hook(args)
 
-    print("Preparing fused pre-rotation model ...")
-    prepare_model_for_rotate(model)
+    if args.rotate:
+        print("Preparing fused rotated model without BFP ...")
+        rotate_hook = _build_rotate_only_hook(args)
+        apply_rotate(
+            model,
+            args.device,
+            rotate_hook,
+            rotate="hadamard",
+        )
+    else:
+        print("Preparing fused pre-rotation model ...")
+        prepare_model_for_rotate(model)
 
     reconstructed = reconstruct_weight_groups(
         model,
@@ -131,9 +163,12 @@ def main():
             metadata={
                 "group": group,
                 "groups": args.groups,
+                "stage": "rotate" if args.rotate else "raw",
                 "model": args.model,
                 "bfp_bits": args.bfp_bits,
                 "bfp_block_size": args.bfp_block_size,
+                "rotate": args.rotate,
+                "online_rotate": args.online_rotate,
                 "bfp_qkv_bits": args.bfp_qkv_bits,
                 "bfp_o_bits": args.bfp_o_bits,
                 "bfp_up_gate_bits": args.bfp_up_gate_bits,
