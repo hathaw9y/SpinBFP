@@ -4,7 +4,7 @@ import torch
 from transformers import AutoModelForCausalLM, AutoTokenizer, set_seed
 
 from rotquant import Hook, apply_rotate
-from rotquant.reconstruction import load_reconstructed_weight_path
+from rotquant.reconstruction import RECONSTRUCTION_ORDER, load_reconstructed_weight_path
 from utils import eval_ppl_wikitext
 
 
@@ -70,6 +70,13 @@ def parse_args():
         type=str,
         default=None,
         help="Load reconstructed weights. Accepts a .pt file or a directory containing recon_*.pt files.",
+    )
+    parser.add_argument(
+        "--load_reconstructed_groups",
+        nargs="+",
+        default=None,
+        choices=list(RECONSTRUCTION_ORDER),
+        help="Only load selected reconstructed module groups.",
     )
     return parser.parse_args()
 
@@ -254,14 +261,22 @@ def main():
         if args.load_reconstructed_weights is None:
             return
         load_reconstructed_weight_path(
-            model, args.load_reconstructed_weights, strict=False, stage="raw",
+            model,
+            args.load_reconstructed_weights,
+            strict=False,
+            stage="raw",
+            groups=args.load_reconstructed_groups,
         )
 
     def post_rotate_callback():
         if args.load_reconstructed_weights is None:
             return
         load_reconstructed_weight_path(
-            model, args.load_reconstructed_weights, strict=False, stage="rotate",
+            model,
+            args.load_reconstructed_weights,
+            strict=False,
+            stage="rotate",
+            groups=args.load_reconstructed_groups,
         )
 
     apply_rotate(

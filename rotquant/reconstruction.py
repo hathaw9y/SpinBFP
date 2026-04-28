@@ -117,14 +117,28 @@ def _checkpoint_stage(state):
     return metadata.get("stage", "raw")
 
 
+def _checkpoint_group(path: str, state):
+    metadata = state.get("metadata", {})
+    if metadata.get("group") is not None:
+        return metadata["group"]
+
+    name = Path(path).name
+    if not name.startswith("recon_") or "_bfp" not in name:
+        return None
+    return name[len("recon_"): name.index("_bfp")]
+
+
 def load_reconstructed_weights(
     model,
     path: str,
     strict: bool = True,
     stage: str | None = None,
+    groups=None,
 ) -> int:
     state = torch.load(path, map_location="cpu")
     if stage is not None and _checkpoint_stage(state) != stage:
+        return 0
+    if groups is not None and _checkpoint_group(path, state) not in set(groups):
         return 0
 
     weights = state.get("weights", state)
@@ -160,6 +174,7 @@ def load_reconstructed_weight_path(
     path: str,
     strict: bool = True,
     stage: str | None = None,
+    groups=None,
 ) -> int:
     recon_path = Path(path)
     if recon_path.is_dir():
@@ -169,13 +184,15 @@ def load_reconstructed_weight_path(
         loaded = 0
         for file in files:
             loaded += load_reconstructed_weights(
-                model, str(file), strict=strict, stage=stage,
+                model, str(file), strict=strict, stage=stage, groups=groups,
             )
         if strict and stage is not None and loaded == 0:
             raise FileNotFoundError(f"No stage={stage} reconstructed weights found in {path}")
         return loaded
 
-    return load_reconstructed_weights(model, path, strict=strict, stage=stage)
+    return load_reconstructed_weights(
+        model, path, strict=strict, stage=stage, groups=groups,
+    )
 
 
 @torch.no_grad()
