@@ -137,24 +137,28 @@ def _build_hook(args, model_dir: str) -> Hook:
     return hook
 
 
-def _print_bfp_stat_table(title, name_label, count_label, rows, name_width) -> None:
+def _print_bfp_stat_table(title, name_label, rows, rate_rows, name_width) -> None:
     if not rows:
         return
 
+    rate_by_name = {item["name"]: item for item in rate_rows}
     print(f"\n--- {title} ---")
     print(
         f"{name_label:{name_width}s} {'mean':>10s} {'variance':>10s} "
-        f"{'min':>6s} {'max':>6s} {count_label:>12s} {'calls':>8s}"
+        f"{'min':>6s} {'max':>6s} {'zero_m':>10s} "
+        f"{'sh>=m-1':>10s} {'sh>=m':>10s}"
     )
     for item in rows:
+        rate = rate_by_name.get(item["name"], {})
         print(
             f"{item['name']:{name_width}s} "
             f"{item['mean']:10.4f} "
             f"{item['variance']:10.4f} "
             f"{item['min']:6.0f} "
             f"{item['max']:6.0f} "
-            f"{item['count']:12d} "
-            f"{item['calls']:8d}"
+            f"{rate.get('zero_mantissa_rate', float('nan')):10.4f} "
+            f"{rate.get('shift_ge_mbits_minus1_rate', float('nan')):10.4f} "
+            f"{rate.get('shift_ge_mbits_rate', float('nan')):10.4f}"
         )
 
 
@@ -168,22 +172,22 @@ def _print_bfp_shared_exponent_stats(hook) -> None:
     _print_bfp_stat_table(
         "BFP shared exponent stats",
         "location",
-        "blocks",
         averages,
+        hook.bfp_rate_averages(),
         72,
     )
     _print_bfp_stat_table(
         "BFP shared exponent stats by position",
         "position",
-        "blocks",
         hook.bfp_shared_exponent_position_averages(),
+        hook.bfp_rate_position_averages(),
         32,
     )
     _print_bfp_stat_table(
         "BFP shared exponent stats by layer",
         "layer",
-        "blocks",
         hook.bfp_shared_exponent_layer_averages(),
+        hook.bfp_rate_layer_averages(),
         12,
     )
     _print_bfp_shift_stats(hook)
@@ -193,22 +197,22 @@ def _print_bfp_shift_stats(hook) -> None:
     _print_bfp_stat_table(
         "BFP bit shift stats",
         "location",
-        "elements",
         hook.bfp_shift_averages(),
+        hook.bfp_rate_averages(),
         72,
     )
     _print_bfp_stat_table(
         "BFP bit shift stats by position",
         "position",
-        "elements",
         hook.bfp_shift_position_averages(),
+        hook.bfp_rate_position_averages(),
         32,
     )
     _print_bfp_stat_table(
         "BFP bit shift stats by layer",
         "layer",
-        "elements",
         hook.bfp_shift_layer_averages(),
+        hook.bfp_rate_layer_averages(),
         12,
     )
 
