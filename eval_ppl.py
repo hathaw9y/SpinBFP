@@ -12,7 +12,7 @@ REFACTOR_DIR = Path(__file__).resolve().parent
 REPO_ROOT = REFACTOR_DIR.parent
 sys.path.insert(0, str(REPO_ROOT))
 
-from bfp_refactor.bfp_llama import (
+from bfp_llama import (
     load_llama_causal_lm,
     load_llama_tokenizer,
     load_opt_causal_lm,
@@ -21,12 +21,12 @@ from bfp_refactor.bfp_llama import (
     setup_bfp_llama,
     setup_bfp_opt as setup_bfp_opt_common,
 )
-from bfp_refactor.bfp_llama.bfp import bfp_quant_dequant, set_bfp_exponent_rounding
-from bfp_refactor.utils.quant_utils import (
+from bfp_llama.bfp import bfp_quant_dequant, set_bfp_exponent_rounding
+from utils.quant_utils import (
     set_bfp_exponent_rounding as set_quant_utils_bfp_exponent_rounding,
 )
-from bfp_refactor.bfp_llama.config import ExperimentConfig
-from bfp_refactor.bfp_llama.data import eval_tokens
+from bfp_llama.config import ExperimentConfig
+from bfp_llama.data import eval_tokens
 
 
 def parse_args():

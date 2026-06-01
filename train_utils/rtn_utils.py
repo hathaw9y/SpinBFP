@@ -11,8 +11,8 @@
 import torch
 import tqdm
 
-from bfp_refactor.train_utils.quant_linear import QuantizeLinear
-from bfp_refactor.utils import quant_utils, utils
+from train_utils.quant_linear import QuantizeLinear
+from utils import quant_utils, utils
 
 
 @torch.no_grad()

@@ -50,7 +50,7 @@ from transformers.utils import (
 )
 from transformers.models.llama.configuration_llama import LlamaConfig
 
-from bfp_refactor.train_utils.quant_linear import QuantizeLinear
+from train_utils.quant_linear import QuantizeLinear
 
 
 logger = logging.get_logger(__name__)

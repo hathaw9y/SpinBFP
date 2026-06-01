@@ -23,7 +23,7 @@ MAX_STEPS=${MAX_STEPS:-100}
 MAX_LENGTH=${MAX_LENGTH:-2048}
 PER_DEVICE_TRAIN_BATCH_SIZE=${PER_DEVICE_TRAIN_BATCH_SIZE:-1}
 LR=${LR:-1.5}
-torchrun --nnodes=1 --nproc_per_node="$NPROC_PER_NODE" bfp_refactor/train_rotation.py \
+torchrun --nnodes=1 --nproc_per_node="$NPROC_PER_NODE" train_rotation.py \
   --model "$MODEL" \
   --output-dir "$OUTPUT_DIR" \
   --w-bits "$W_BITS" \

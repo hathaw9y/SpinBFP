@@ -13,9 +13,9 @@ import math
 import torch
 import transformers
 
-from bfp_refactor.train_utils.quant_linear import QuantizeLinear
-from bfp_refactor.utils import hadamard_utils
-from bfp_refactor.utils.utils import HadamardTransform
+from train_utils.quant_linear import QuantizeLinear
+from utils import hadamard_utils
+from utils.utils import HadamardTransform
 
 
 BFP_EXPONENT_ROUNDING = "floor"

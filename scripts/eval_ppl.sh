@@ -37,7 +37,7 @@ QK_MATMUL_BITS=${QK_MATMUL_BITS:-$KV_BITS}
 AV_MATMUL_BITS=${AV_MATMUL_BITS:-$KV_BITS}
 QK_MATMUL_BFP_GROUP_SIZE=${QK_MATMUL_BFP_GROUP_SIZE:-32}
 AV_MATMUL_BFP_GROUP_SIZE=${AV_MATMUL_BFP_GROUP_SIZE:-32}
-python bfp_refactor/eval_ppl.py \
+python eval_ppl.py \
   --model "$MODEL" \
   --experiment-dir "$EXPERIMENT_DIR" \
   --w-bits "$W_BITS" \

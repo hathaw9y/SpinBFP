@@ -2,8 +2,8 @@ import math
 
 import torch
 
-from bfp_refactor.utils import hadamard_utils
-from bfp_refactor.utils.utils import HadamardTransform
+from utils import hadamard_utils
+from utils.utils import HadamardTransform
 
 
 def random_hadamard(size, device):

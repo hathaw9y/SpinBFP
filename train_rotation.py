@@ -19,18 +19,18 @@ REFACTOR_DIR = Path(__file__).resolve().parent
 REPO_ROOT = REFACTOR_DIR.parent
 sys.path.insert(0, str(REPO_ROOT))
 
-from bfp_refactor.bfp_llama.bfp import bfp_quant_dequant
-from bfp_refactor.bfp_llama.config import ExperimentConfig
-from bfp_refactor.bfp_llama.modeling import add_attention_matmul_bfp, rotation_filename
-from bfp_refactor.train_utils.fsdp_trainer import FSDPTrainer
-from bfp_refactor.train_utils.main import prepare_model
-from bfp_refactor.train_utils.modeling_llama_quant import (
+from bfp_llama.bfp import bfp_quant_dequant
+from bfp_llama.config import ExperimentConfig
+from bfp_llama.modeling import add_attention_matmul_bfp, rotation_filename
+from train_utils.fsdp_trainer import FSDPTrainer
+from train_utils.main import prepare_model
+from train_utils.modeling_llama_quant import (
     LlamaForCausalLM as LlamaForCausalLMQuant,
 )
-from bfp_refactor.train_utils.optimizer import SGDG
-from bfp_refactor.utils.data_utils import CustomJsonDataset
-from bfp_refactor.utils.hadamard_utils import random_hadamard_matrix
-from bfp_refactor.utils.utils import get_global_rank, get_local_rank, set_seed
+from train_utils.optimizer import SGDG
+from utils.data_utils import CustomJsonDataset
+from utils.hadamard_utils import random_hadamard_matrix
+from utils.utils import get_global_rank, get_local_rank, set_seed
 
 
 def parse_args():
