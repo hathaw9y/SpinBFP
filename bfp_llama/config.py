@@ -15,13 +15,14 @@ class ExperimentConfig:
     w_bfp_group_size: int = 32
     a_bfp_group_size: int = 32
     kv_bfp_group_size: int = 32
-    online_had_group_size: int = -1
-    w_down_had_group_size: int = -1
-    qk_had_group_size: int = -1
+    online_had_group_size: int = 32
+    w_down_had_group_size: int = 32
+    qk_had_group_size: int = 32
     qk_matmul_bits: int = 4
     av_matmul_bits: int = 4
     qk_matmul_bfp_group_size: int = 32
     av_matmul_bfp_group_size: int = 32
+    rotation_block_size: int = 0
     rotate: bool = True
     fp32_had: bool = False
 

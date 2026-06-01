@@ -27,6 +27,7 @@ from utils.quant_utils import (
 )
 from bfp_llama.config import ExperimentConfig
 from bfp_llama.data import eval_tokens
+from utils.rotation_utils import apply_rotation_left, apply_rotation_right, rotation_total_dim
 
 
 def parse_args():
@@ -46,13 +47,14 @@ def parse_args():
     parser.add_argument("--bfp-exponent-rounding", choices=["floor", "ceil"], default="floor")
     parser.add_argument("--dtype", choices=["auto", "fp16", "bf16"], default="auto")
     parser.add_argument("--rotation-compute-dtype", choices=["fp64", "fp32"], default="fp64")
-    parser.add_argument("--online-had-group-size", type=int, default=-1)
-    parser.add_argument("--w-down-had-group-size", type=int, default=-1)
-    parser.add_argument("--qk-had-group-size", type=int, default=-1)
+    parser.add_argument("--online-had-group-size", type=int, default=32)
+    parser.add_argument("--w-down-had-group-size", type=int, default=32)
+    parser.add_argument("--qk-had-group-size", type=int, default=32)
     parser.add_argument("--qk-matmul-bits", type=int, default=None)
     parser.add_argument("--av-matmul-bits", type=int, default=None)
     parser.add_argument("--qk-matmul-bfp-group-size", type=int, default=32)
     parser.add_argument("--av-matmul-bfp-group-size", type=int, default=32)
+    parser.add_argument("--rotation-block-size", type=int, default=32)
     parser.add_argument("--no-rotate", action="store_true")
     return parser.parse_args()
 
@@ -75,6 +77,7 @@ def load_config(args):
         av_matmul_bits=args.av_matmul_bits or args.kv_bits,
         qk_matmul_bfp_group_size=args.qk_matmul_bfp_group_size,
         av_matmul_bfp_group_size=args.av_matmul_bfp_group_size,
+        rotation_block_size=args.rotation_block_size,
         rotate=not args.no_rotate,
     )
 
@@ -135,17 +138,17 @@ class OptEvalRotationLinear(nn.Module):
         r2 = self._r2()
         if r2 is None:
             return weight
-        had_dim = r2.shape[0]
+        had_dim = rotation_total_dim(r2)
         dtype = weight.dtype
         if transpose:
             shape = weight.shape
             temp = weight.reshape(-1, shape[-1] // had_dim, had_dim)
-            temp = temp.to(self.compute_dtype) @ r2.to(self.compute_dtype)
+            temp = apply_rotation_right(temp, r2, self.compute_dtype)
             return temp.reshape(shape).to(dtype)
         wt = weight.t()
         shape = wt.shape
         temp = wt.reshape(-1, shape[-1] // had_dim, had_dim)
-        temp = temp.to(self.compute_dtype) @ r2.to(self.compute_dtype)
+        temp = apply_rotation_right(temp, r2, self.compute_dtype)
         return temp.reshape(shape).t().to(dtype)
 
     def _effective_weight(self):
@@ -156,9 +159,9 @@ class OptEvalRotationLinear(nn.Module):
         r1 = r1_module.weight
         dtype = weight.dtype
         if self.role in ["q_proj", "k_proj", "v_proj", "fc1"]:
-            weight = (weight.to(self.compute_dtype) @ r1.to(self.compute_dtype)).to(dtype)
+            weight = apply_rotation_right(weight, r1, self.compute_dtype)
         elif self.role in ["out_proj", "fc2"]:
-            weight = (r1.t().to(self.compute_dtype) @ weight.to(self.compute_dtype)).to(dtype)
+            weight = apply_rotation_left(weight, r1, self.compute_dtype, transpose=True)
         if self.role == "v_proj":
             weight = self._apply_r2_to_weight(weight, transpose=False)
         elif self.role == "out_proj":
@@ -171,7 +174,7 @@ class OptEvalRotationLinear(nn.Module):
             r1_module = self._r1()
             if self.cfg.rotate and r1_module is not None:
                 r1 = r1_module.weight
-                x = (x.to(self.compute_dtype) @ r1.t().to(self.compute_dtype)).to(x_dtype)
+                x = apply_rotation_right(x, r1, self.compute_dtype, transpose=True)
             return self.linear(x).to(x_dtype)
 
         x = bfp_quant_dequant(x, self.cfg.a_bits, self.cfg.a_bfp_group_size)
@@ -218,7 +221,7 @@ def setup_bfp_opt(model, cfg, rotation_path=None, compute_dtype=torch.float64):
                 return args, kwargs
 
             def rotate(x):
-                return (x.to(compute_dtype) @ model.R1.weight.to(compute_dtype)).to(x.dtype)
+                return apply_rotation_right(x, model.R1.weight, compute_dtype)
 
             if len(args) > 0:
                 return (rotate(args[0]),) + args[1:], kwargs
@@ -332,10 +335,11 @@ def evaluate_layerwise(model, input_ids, seqlen, batch_size, device):
 
         def forward(self, hidden_states, **kwargs):
             if hasattr(model, "bfp_R1"):
-                hidden_states = (
-                    hidden_states.to(torch.float64)
-                    @ model.bfp_R1.weight.to(torch.float64)
-                ).to(hidden_states.dtype)
+                hidden_states = apply_rotation_right(
+                    hidden_states,
+                    model.bfp_R1.weight,
+                    torch.float64,
+                )
             inps[cache["i"]] = hidden_states
             attention_masks[cache["i"]] = kwargs["attention_mask"]
             position_ids[cache["i"]] = kwargs["position_ids"]

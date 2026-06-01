@@ -3,6 +3,7 @@ import math
 import torch
 
 from utils import hadamard_utils
+from utils.rotation_utils import apply_rotation_right, rotation_total_dim
 from utils.utils import HadamardTransform
 
 
@@ -32,17 +33,13 @@ def apply_exact_had_to_linear(linear, group_size):
 def apply_r2_to_weight(weight, r2, transpose):
     if r2 is None:
         return weight
-    had_dim = r2.shape[0]
+    had_dim = rotation_total_dim(r2)
     if transpose:
         shape = weight.shape
         temp = weight.reshape(-1, shape[-1] // had_dim, had_dim)
-        return (temp.to(torch.float64) @ r2.to(torch.float64)).reshape(shape).to(
-            weight.dtype
-        )
+        return apply_rotation_right(temp, r2, torch.float64).reshape(shape).to(weight.dtype)
 
     wt = weight.t()
     shape = wt.shape
     temp = wt.reshape(-1, shape[-1] // had_dim, had_dim)
-    return (temp.to(torch.float64) @ r2.to(torch.float64)).reshape(shape).t().to(
-        weight.dtype
-    )
+    return apply_rotation_right(temp, r2, torch.float64).reshape(shape).t().to(weight.dtype)

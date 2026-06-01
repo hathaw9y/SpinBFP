@@ -30,6 +30,7 @@ from train_utils.modeling_llama_quant import (
 from train_utils.optimizer import SGDG
 from utils.data_utils import CustomJsonDataset
 from utils.hadamard_utils import random_hadamard_matrix
+from utils.rotation_utils import apply_rotation_left, apply_rotation_right
 from utils.utils import get_global_rank, get_local_rank, set_seed
 
 
@@ -52,13 +53,14 @@ def parse_args():
     parser.add_argument("--kv-bfp-group-size", type=int, default=None)
     parser.add_argument("--dtype", choices=["auto", "fp16", "bf16"], default="auto")
     parser.add_argument("--rotation-compute-dtype", choices=["fp64", "fp32"], default="fp64")
-    parser.add_argument("--online-had-group-size", type=int, default=-1)
-    parser.add_argument("--w-down-had-group-size", type=int, default=-1)
-    parser.add_argument("--qk-had-group-size", type=int, default=-1)
+    parser.add_argument("--online-had-group-size", type=int, default=32)
+    parser.add_argument("--w-down-had-group-size", type=int, default=32)
+    parser.add_argument("--qk-had-group-size", type=int, default=32)
     parser.add_argument("--qk-matmul-bits", type=int, default=None)
     parser.add_argument("--av-matmul-bits", type=int, default=None)
     parser.add_argument("--qk-matmul-bfp-group-size", type=int, default=32)
     parser.add_argument("--av-matmul-bfp-group-size", type=int, default=32)
+    parser.add_argument("--rotation-block-size", type=int, default=32)
     parser.add_argument("--fp32-had", action="store_true")
     parser.add_argument("--gradient-checkpointing", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--fsdp", default="")
@@ -75,6 +77,41 @@ class RotateModule(nn.Module):
         if transpose:
             return x @ self.weight
         return self.weight @ x
+
+
+class BlockDiagRotateModule(nn.Module):
+    def __init__(self, size, block_size):
+        super().__init__()
+        if block_size <= 0 or size % block_size != 0:
+            raise ValueError(f"rotation size {size} must be divisible by block size {block_size}")
+        self.blocks = nn.ParameterList(
+            [
+                nn.Parameter(
+                    random_hadamard_matrix(block_size, "cuda").to(
+                        dtype=torch.float32,
+                        device=torch.cuda.current_device(),
+                    )
+                )
+                for _ in range(size // block_size)
+            ]
+        )
+
+    @property
+    def weight(self):
+        return torch.stack(tuple(self.blocks), dim=0)
+
+
+def make_rotation_module(size, block_size):
+    if block_size and block_size > 0:
+        return BlockDiagRotateModule(size, block_size)
+    return RotateModule(random_hadamard_matrix(size, "cuda"))
+
+
+def rotation_module_params(*modules):
+    params = []
+    for module in modules:
+        params.extend(module.parameters())
+    return params
 
 
 class OptRotationLinear(nn.Module):
@@ -110,18 +147,18 @@ class OptRotationLinear(nn.Module):
         r2 = self._r2()
         if r2 is None:
             return weight
-        had_dim = r2.shape[0]
+        had_dim = r2.shape[0] * r2.shape[-1] if r2.dim() == 3 else r2.shape[0]
         dtype = weight.dtype
         compute_dtype = self.compute_dtype
         if transpose:
             shape = weight.shape
             temp = weight.reshape(-1, shape[-1] // had_dim, had_dim)
-            temp = temp.to(compute_dtype) @ r2.to(compute_dtype)
+            temp = apply_rotation_right(temp, r2, compute_dtype)
             return temp.reshape(shape).to(dtype)
         wt = weight.t()
         shape = wt.shape
         temp = wt.reshape(-1, shape[-1] // had_dim, had_dim)
-        temp = temp.to(compute_dtype) @ r2.to(compute_dtype)
+        temp = apply_rotation_right(temp, r2, compute_dtype)
         return temp.reshape(shape).t().to(dtype)
 
     def _effective_weight(self):
@@ -130,9 +167,9 @@ class OptRotationLinear(nn.Module):
         dtype = weight.dtype
         compute_dtype = self.compute_dtype
         if self.role in ["q_proj", "k_proj", "v_proj", "fc1"]:
-            weight = (weight.to(compute_dtype) @ r1.to(compute_dtype)).to(dtype)
+            weight = apply_rotation_right(weight, r1, compute_dtype)
         elif self.role in ["out_proj", "fc2"]:
-            weight = (r1.t().to(compute_dtype) @ weight.to(compute_dtype)).to(dtype)
+            weight = apply_rotation_left(weight, r1, compute_dtype, transpose=True)
         if self.role == "v_proj":
             weight = self._apply_r2_to_weight(weight, transpose=False)
         elif self.role == "out_proj":
@@ -143,7 +180,7 @@ class OptRotationLinear(nn.Module):
         x_dtype = x.dtype
         if self.role == "lm_head":
             r1 = self._r1()
-            x = (x.to(self.compute_dtype) @ r1.t().to(self.compute_dtype)).to(x_dtype)
+            x = apply_rotation_right(x, r1, self.compute_dtype, transpose=True)
             return self.linear(x).to(x_dtype)
 
         x = bfp_quant_dequant(x, self.cfg.a_bits, self.cfg.a_bfp_group_size)
@@ -171,10 +208,10 @@ def _replace_opt_linears(model, cfg, compute_dtype):
 def setup_opt_rotation_model(model, cfg, compute_dtype):
     for param in model.parameters():
         param.requires_grad = False
-    model.R1 = RotateModule(random_hadamard_matrix(model.config.hidden_size, "cuda"))
+    model.R1 = make_rotation_module(model.config.hidden_size, cfg.rotation_block_size)
     head_dim = model.config.hidden_size // model.config.num_attention_heads
     for layer in model.model.decoder.layers:
-        layer.self_attn.R2 = RotateModule(random_hadamard_matrix(head_dim, "cuda"))
+        layer.self_attn.R2 = make_rotation_module(head_dim, cfg.rotation_block_size)
     _replace_opt_linears(model, cfg, compute_dtype)
 
     if hasattr(model, "_bfp_opt_input_rotation_hook"):
@@ -185,7 +222,7 @@ def setup_opt_rotation_model(model, cfg, compute_dtype):
             return args, kwargs
 
         def rotate(x):
-            return (x.to(compute_dtype) @ model.R1.weight.to(compute_dtype)).to(x.dtype)
+            return apply_rotation_right(x, model.R1.weight, compute_dtype)
 
         if len(args) > 0:
             return (rotate(args[0]),) + args[1:], kwargs
@@ -391,6 +428,7 @@ def main():
         av_matmul_bits=args.av_matmul_bits or args.kv_bits,
         qk_matmul_bfp_group_size=args.qk_matmul_bfp_group_size,
         av_matmul_bfp_group_size=args.av_matmul_bfp_group_size,
+        rotation_block_size=args.rotation_block_size,
         rotate=True,
         fp32_had=args.fp32_had,
     )
@@ -402,6 +440,7 @@ def main():
     rotation_compute_dtype = resolve_rotation_compute_dtype(args.rotation_compute_dtype)
     if local_rank == 0:
         print(f"Using rotation compute dtype: {rotation_compute_dtype}")
+        print(f"Using rotation block size: {cfg.rotation_block_size or 'full'}")
 
     if hf_config.model_type == "llama":
         if cfg.qk_matmul_bits < 16 or cfg.av_matmul_bits < 16:
@@ -426,15 +465,17 @@ def main():
         add_attention_matmul_bfp(model, cfg)
         for param in model.parameters():
             param.requires_grad = False
-        model.R1 = RotateModule(random_hadamard_matrix(model.config.hidden_size, "cuda"))
+        model.R1 = make_rotation_module(model.config.hidden_size, cfg.rotation_block_size)
         for i in range(model.config.num_hidden_layers):
             head_dim = model.config.hidden_size // model.config.num_attention_heads
-            model.model.layers[i].self_attn.R2 = RotateModule(
-                random_hadamard_matrix(head_dim, "cuda")
+            model.model.layers[i].self_attn.R2 = make_rotation_module(
+                head_dim,
+                cfg.rotation_block_size,
             )
-        rotation_params = [model.R1.weight] + [
-            model.model.layers[i].self_attn.R2.weight
+        rotation_params = rotation_module_params(model.R1) + [
+            param
             for i in range(model.config.num_hidden_layers)
+            for param in model.model.layers[i].self_attn.R2.parameters()
         ]
         tokenizer = LlamaTokenizerFast.from_pretrained(
             pretrained_model_name_or_path=args.model,
@@ -455,9 +496,10 @@ def main():
             token=args.access_token,
         )
         model = setup_opt_rotation_model(model, cfg, rotation_compute_dtype)
-        rotation_params = [model.R1.weight] + [
-            layer.self_attn.R2.weight
+        rotation_params = rotation_module_params(model.R1) + [
+            param
             for layer in model.model.decoder.layers
+            for param in layer.self_attn.R2.parameters()
         ]
         tokenizer = AutoTokenizer.from_pretrained(
             pretrained_model_name_or_path=args.model,

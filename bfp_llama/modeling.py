@@ -17,6 +17,7 @@ from .hadamard import (
     apply_r2_to_weight,
     random_hadamard,
 )
+from utils.rotation_utils import apply_rotation_left, apply_rotation_right
 
 
 class RotationModule(nn.Module):
@@ -26,6 +27,18 @@ class RotationModule(nn.Module):
             self.weight = nn.Parameter(matrix.to(torch.float32))
         else:
             self.register_buffer("weight", matrix.to(torch.float32))
+
+
+def _random_rotation(size, cfg, device):
+    block_size = getattr(cfg, "rotation_block_size", 0)
+    if block_size and block_size > 0:
+        if size % block_size != 0:
+            raise ValueError(f"rotation size {size} must be divisible by block size {block_size}")
+        return torch.stack(
+            [random_hadamard(block_size, device) for _ in range(size // block_size)],
+            dim=0,
+        )
+    return random_hadamard(size, device)
 
 
 def _copy_func_with_new_globals(func, globals_dict):
@@ -93,11 +106,11 @@ class BfpRotationLinear(nn.Module):
 
         dtype = weight.dtype
         if self.role in ["q_proj", "k_proj", "gate_proj", "up_proj", "lm_head"]:
-            weight = (weight.to(torch.float64) @ r1.to(torch.float64)).to(dtype)
+            weight = apply_rotation_right(weight, r1, torch.float64)
         elif self.role in ["o_proj", "down_proj"]:
-            weight = (r1.to(torch.float64).t() @ weight.to(torch.float64)).to(dtype)
+            weight = apply_rotation_left(weight, r1, torch.float64, transpose=True)
         elif self.role == "v_proj":
-            weight = (weight.to(torch.float64) @ r1.to(torch.float64)).to(dtype)
+            weight = apply_rotation_right(weight, r1, torch.float64)
 
         if self.role == "v_proj":
             weight = apply_r2_to_weight(weight, self._r2(), transpose=False)
@@ -176,9 +189,9 @@ class OptBfpRotationLinear(nn.Module):
         dtype = weight.dtype
         compute_dtype = self.compute_dtype
         if self.role in ["q_proj", "k_proj", "v_proj", "fc1", "lm_head"]:
-            weight = (weight.to(compute_dtype) @ r1.to(compute_dtype)).to(dtype)
+            weight = apply_rotation_right(weight, r1, compute_dtype)
         elif self.role in ["out_proj", "fc2"]:
-            weight = (r1.t().to(compute_dtype) @ weight.to(compute_dtype)).to(dtype)
+            weight = apply_rotation_left(weight, r1, compute_dtype, transpose=True)
 
         if self.role == "v_proj":
             weight = self._apply_r2_to_weight(weight, transpose=False)
@@ -321,14 +334,14 @@ def _set_rotations(model, cfg, trainable, rotation_path=None, rotations=None):
     if rotations is not None:
         r1 = rotations["R1"].cuda()
     else:
-        r1 = random_hadamard(model.config.hidden_size, "cuda")
+        r1 = _random_rotation(model.config.hidden_size, cfg, "cuda")
 
     model.bfp_R1 = RotationModule(r1, trainable=trainable)
     head_dim = model.config.hidden_size // model.config.num_attention_heads
 
     for idx, layer in enumerate(model.model.layers):
         if rotations is None:
-            r2 = random_hadamard(head_dim, "cuda")
+            r2 = _random_rotation(head_dim, cfg, "cuda")
         else:
             r2 = rotations[f"model.layers.{idx}.self_attn.R2"].cuda()
         layer.self_attn.bfp_R2 = RotationModule(r2, trainable=trainable)
@@ -343,9 +356,7 @@ def _add_input_rotation_hook(model):
             return args, kwargs
 
         def rotate(x):
-            return (x.to(torch.float64) @ model.bfp_R1.weight.to(torch.float64)).to(
-                x.dtype
-            )
+            return apply_rotation_right(x, model.bfp_R1.weight, torch.float64)
 
         if len(args) > 0:
             return (rotate(args[0]),) + args[1:], kwargs
@@ -434,20 +445,20 @@ def _replace_opt_linears(model, cfg, compute_dtype):
     model.lm_head = OptBfpRotationLinear(model.lm_head, "lm_head", cfg, model=model, compute_dtype=compute_dtype)
 
 
-def _set_opt_rotations(model, trainable, rotation_path=None, rotations=None):
+def _set_opt_rotations(model, cfg, trainable, rotation_path=None, rotations=None):
     if rotations is None:
         rotations = _load_rotation_state(rotation_path)
     if rotations is not None:
         r1 = rotations["R1"].cuda()
     else:
-        r1 = random_hadamard(model.config.hidden_size, "cuda")
+        r1 = _random_rotation(model.config.hidden_size, cfg, "cuda")
 
     model.bfp_R1 = RotationModule(r1, trainable=trainable)
     head_dim = model.config.hidden_size // model.config.num_attention_heads
 
     for idx, layer in enumerate(_opt_layers(model)):
         if rotations is None:
-            r2 = random_hadamard(head_dim, "cuda")
+            r2 = _random_rotation(head_dim, cfg, "cuda")
         else:
             key = f"model.decoder.layers.{idx}.self_attn.R2"
             if key not in rotations:
@@ -465,7 +476,7 @@ def _add_opt_input_rotation_hook(model, compute_dtype):
             return args, kwargs
 
         def rotate(x):
-            return (x.to(compute_dtype) @ model.bfp_R1.weight.to(compute_dtype)).to(x.dtype)
+            return apply_rotation_right(x, model.bfp_R1.weight, compute_dtype)
 
         if len(args) > 0:
             return (rotate(args[0]),) + args[1:], kwargs
@@ -485,7 +496,7 @@ def setup_bfp_opt(model, cfg, trainable_rotations=False, rotation_path=None, com
 
     rotations = _load_rotation_state(rotation_path) if cfg.rotate and rotation_path is not None else None
     if cfg.rotate:
-        _set_opt_rotations(model, trainable=trainable_rotations, rotation_path=rotation_path, rotations=rotations)
+        _set_opt_rotations(model, cfg, trainable=trainable_rotations, rotation_path=rotation_path, rotations=rotations)
 
     _replace_opt_linears(model, cfg, compute_dtype=compute_dtype)
     if cfg.rotate:
@@ -527,10 +538,14 @@ def _hadamard_type(group_size):
 
 
 def rotation_suffix(cfg):
-    return (
+    suffix = (
         _hadamard_type(cfg.w_down_had_group_size)
         + _hadamard_type(cfg.qk_had_group_size)
     )
+    block_size = getattr(cfg, "rotation_block_size", 0)
+    if block_size and block_size > 0:
+        suffix += f"_B{block_size}"
+    return suffix
 
 
 def rotation_filename(cfg):

@@ -51,6 +51,7 @@ from transformers.utils import (
 from transformers.models.llama.configuration_llama import LlamaConfig
 
 from train_utils.quant_linear import QuantizeLinear
+from utils.rotation_utils import apply_rotation_right
 
 
 logger = logging.get_logger(__name__)
@@ -1088,11 +1089,8 @@ class LlamaModel(LlamaPreTrainedModel):
         if inputs_embeds is None:
             inputs_embeds = self.embed_tokens(input_ids)
         if R1 is not None:
-            dtype = inputs_embeds.dtype
             compute_dtype = getattr(self, "rotation_compute_dtype", torch.float64)
-            inputs_embeds = (inputs_embeds.to(compute_dtype) @ R1.to(compute_dtype)).to(
-                dtype
-            )
+            inputs_embeds = apply_rotation_right(inputs_embeds, R1, compute_dtype)
 
         return_legacy_cache = False
         if (
@@ -1382,11 +1380,13 @@ class LlamaForCausalLM(LlamaPreTrainedModel):
 
         hidden_states = outputs[0]
         if self.R1 is not None:
-            dtype = hidden_states.dtype
             compute_dtype = getattr(self, "rotation_compute_dtype", torch.float64)
-            hidden_states = (
-                hidden_states.to(compute_dtype) @ self.R1.weight.T.to(compute_dtype)
-            ).to(dtype)
+            hidden_states = apply_rotation_right(
+                hidden_states,
+                self.R1.weight,
+                compute_dtype,
+                transpose=True,
+            )
 
         if self.config.pretraining_tp > 1:
             lm_head_slices = self.lm_head.weight.split(
