@@ -134,7 +134,27 @@ def find_rotation_path(args, cfg):
 
 
 def _tensor_to(x, device):
-    return x.to(device) if torch.is_tensor(x) else x
+    if torch.is_tensor(x):
+        return x.to(device)
+    if isinstance(x, tuple):
+        return tuple(_tensor_to(item, device) for item in x)
+    if isinstance(x, list):
+        return [_tensor_to(item, device) for item in x]
+    if isinstance(x, dict):
+        return {key: _tensor_to(value, device) for key, value in x.items()}
+    return x
+
+
+def _tensor_to_cpu(x):
+    if torch.is_tensor(x):
+        return x.detach().cpu()
+    if isinstance(x, tuple):
+        return tuple(_tensor_to_cpu(item) for item in x)
+    if isinstance(x, list):
+        return [_tensor_to_cpu(item) for item in x]
+    if isinstance(x, dict):
+        return {key: _tensor_to_cpu(value) for key, value in x.items()}
+    return x
 
 
 @torch.no_grad()
@@ -151,11 +171,12 @@ def capture_first_layer_inputs(model, batches, device):
 
     layers = model.model.layers
     model.model.embed_tokens = model.model.embed_tokens.to(device)
+    if hasattr(model.model, "rotary_emb"):
+        model.model.rotary_emb = model.model.rotary_emb.to(device)
     layers[0] = layers[0].to(device)
 
     inps = [None] * len(batches)
-    attention_masks = [None] * len(batches)
-    position_ids = [None] * len(batches)
+    layer_kwargs = [None] * len(batches)
     cache = {"i": 0}
 
     class Catcher(torch.nn.Module):
@@ -171,8 +192,7 @@ def capture_first_layer_inputs(model, batches, device):
                     torch.float64,
                 )
             inps[cache["i"]] = hidden_states.detach().cpu()
-            attention_masks[cache["i"]] = kwargs.get("attention_mask")
-            position_ids[cache["i"]] = kwargs.get("position_ids")
+            layer_kwargs[cache["i"]] = _tensor_to_cpu(kwargs)
             cache["i"] += 1
             raise ValueError
 
@@ -184,9 +204,11 @@ def capture_first_layer_inputs(model, batches, device):
             pass
     layers[0] = layers[0].module.cpu()
     model.model.embed_tokens = model.model.embed_tokens.cpu()
+    if hasattr(model.model, "rotary_emb"):
+        model.model.rotary_emb = model.model.rotary_emb.cpu()
     model.config.use_cache = use_cache
     torch.cuda.empty_cache()
-    return inps, attention_masks, position_ids
+    return inps, layer_kwargs
 
 
 def _layer_targets(layer, layer_idx):
@@ -232,14 +254,11 @@ def _register_hessian_hooks(targets, group_size, device):
 
 
 @torch.no_grad()
-def run_layer(layer, inps, attention_masks, position_ids, device):
+def run_layer(layer, inps, layer_kwargs, device):
     outs = []
     for idx, hidden_states in enumerate(inps):
-        out = layer(
-            hidden_states.to(device),
-            attention_mask=_tensor_to(attention_masks[idx], device),
-            position_ids=_tensor_to(position_ids[idx], device),
-        )[0]
+        kwargs = _tensor_to(layer_kwargs[idx], device)
+        out = layer(hidden_states.to(device), **kwargs)[0]
         outs.append(out.detach().cpu())
     return outs
 
@@ -270,7 +289,7 @@ def apply_layer_bfp_gptq(layer, layer_idx, stats, args):
 
 @torch.no_grad()
 def calibrate_bfp_gptq(model, batches, args, device):
-    inps, attention_masks, position_ids = capture_first_layer_inputs(model, batches, device)
+    inps, layer_kwargs = capture_first_layer_inputs(model, batches, device)
     all_weights = {}
     layers = model.model.layers
 
@@ -278,12 +297,12 @@ def calibrate_bfp_gptq(model, batches, args, device):
         layer = layers[layer_idx].to(device)
         targets = _layer_targets(layer, layer_idx)
         stats, handles = _register_hessian_hooks(targets, args.w_gptq_group_size, device)
-        _ = run_layer(layer, inps, attention_masks, position_ids, device)
+        _ = run_layer(layer, inps, layer_kwargs, device)
         for handle in handles:
             handle.remove()
 
         all_weights.update(apply_layer_bfp_gptq(layer, layer_idx, stats, args))
-        inps = run_layer(layer, inps, attention_masks, position_ids, device)
+        inps = run_layer(layer, inps, layer_kwargs, device)
 
         layers[layer_idx] = layer.cpu()
         del layer, stats
