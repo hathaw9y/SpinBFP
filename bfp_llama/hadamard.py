@@ -11,6 +11,10 @@ def random_hadamard(size, device):
     return hadamard_utils.random_hadamard_matrix(size, device).to(torch.float32)
 
 
+def hadamard(size, device):
+    return hadamard_utils.hadamard_matrix(size, device).to(torch.float32)
+
+
 def apply_full_had(x):
     had_k, k = hadamard_utils.get_hadK(x.shape[-1])
     return hadamard_utils.matmul_hadU_cuda(x, had_k, k)

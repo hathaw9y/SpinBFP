@@ -23,6 +23,7 @@ class ExperimentConfig:
     qk_matmul_bfp_group_size: int = 32
     av_matmul_bfp_group_size: int = 32
     rotation_block_size: int = 0
+    rotation_init: str = "random_hadamard"
     rotate: bool = True
     fp32_had: bool = False
 

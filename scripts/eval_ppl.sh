@@ -53,6 +53,7 @@ AV_MATMUL_BITS=${AV_MATMUL_BITS:-$KV_BITS}
 QK_MATMUL_BFP_GROUP_SIZE=${QK_MATMUL_BFP_GROUP_SIZE:-32}
 AV_MATMUL_BFP_GROUP_SIZE=${AV_MATMUL_BFP_GROUP_SIZE:-32}
 ROTATION_BLOCK_SIZE=${ROTATION_BLOCK_SIZE:-0}
+ROTATION_INIT=${ROTATION_INIT:-random_hadamard}
 python eval_ppl.py \
   --model "$MODEL" \
   --experiment-dir "$EXPERIMENT_DIR" \
@@ -71,6 +72,7 @@ python eval_ppl.py \
   --av-matmul-bits "$AV_MATMUL_BITS" \
   --av-matmul-bfp-group-size "$AV_MATMUL_BFP_GROUP_SIZE" \
   --rotation-block-size "$ROTATION_BLOCK_SIZE" \
+  --rotation-init "$ROTATION_INIT" \
   --dataset "$DATASET" \
   --batch-size "$BATCH_SIZE" \
   --eval-nsamples "$EVAL_NSAMPLES" \

@@ -29,7 +29,7 @@ from train_utils.modeling_llama_quant import (
 )
 from train_utils.optimizer import SGDG
 from utils.data_utils import CustomJsonDataset
-from utils.hadamard_utils import random_hadamard_matrix
+from utils.hadamard_utils import hadamard_matrix, random_hadamard_matrix
 from utils.rotation_utils import apply_rotation_left, apply_rotation_right
 from utils.utils import get_global_rank, get_local_rank, set_seed
 
@@ -61,6 +61,7 @@ def parse_args():
     parser.add_argument("--qk-matmul-bfp-group-size", type=int, default=32)
     parser.add_argument("--av-matmul-bfp-group-size", type=int, default=32)
     parser.add_argument("--rotation-block-size", type=int, default=0)
+    parser.add_argument("--rotation-init", choices=["random_hadamard", "hadamard"], default="random_hadamard")
     parser.add_argument("--fp32-had", action="store_true")
     parser.add_argument("--gradient-checkpointing", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--fsdp", default="")
@@ -80,14 +81,14 @@ class RotateModule(nn.Module):
 
 
 class BlockDiagRotateModule(nn.Module):
-    def __init__(self, size, block_size):
+    def __init__(self, size, block_size, init_fn):
         super().__init__()
         if block_size <= 0 or size % block_size != 0:
             raise ValueError(f"rotation size {size} must be divisible by block size {block_size}")
         self.blocks = nn.ParameterList(
             [
                 nn.Parameter(
-                    random_hadamard_matrix(block_size, "cuda").to(
+                    init_fn(block_size, "cuda").to(
                         dtype=torch.float32,
                         device=torch.cuda.current_device(),
                     )
@@ -101,10 +102,19 @@ class BlockDiagRotateModule(nn.Module):
         return torch.stack(tuple(self.blocks), dim=0)
 
 
-def make_rotation_module(size, block_size):
+def rotation_init_fn(rotation_init):
+    if rotation_init == "hadamard":
+        return hadamard_matrix
+    if rotation_init == "random_hadamard":
+        return random_hadamard_matrix
+    raise ValueError(f"Unsupported rotation init: {rotation_init}")
+
+
+def make_rotation_module(size, block_size, rotation_init="random_hadamard"):
+    init_fn = rotation_init_fn(rotation_init)
     if block_size and block_size > 0:
-        return BlockDiagRotateModule(size, block_size)
-    return RotateModule(random_hadamard_matrix(size, "cuda"))
+        return BlockDiagRotateModule(size, block_size, init_fn)
+    return RotateModule(init_fn(size, "cuda"))
 
 
 def rotation_module_params(*modules):
@@ -208,10 +218,10 @@ def _replace_opt_linears(model, cfg, compute_dtype):
 def setup_opt_rotation_model(model, cfg, compute_dtype):
     for param in model.parameters():
         param.requires_grad = False
-    model.R1 = make_rotation_module(model.config.hidden_size, cfg.rotation_block_size)
+    model.R1 = make_rotation_module(model.config.hidden_size, cfg.rotation_block_size, cfg.rotation_init)
     head_dim = model.config.hidden_size // model.config.num_attention_heads
     for layer in model.model.decoder.layers:
-        layer.self_attn.R2 = make_rotation_module(head_dim, cfg.rotation_block_size)
+        layer.self_attn.R2 = make_rotation_module(head_dim, cfg.rotation_block_size, cfg.rotation_init)
     _replace_opt_linears(model, cfg, compute_dtype)
 
     if hasattr(model, "_bfp_opt_input_rotation_hook"):
@@ -429,6 +439,7 @@ def main():
         qk_matmul_bfp_group_size=args.qk_matmul_bfp_group_size,
         av_matmul_bfp_group_size=args.av_matmul_bfp_group_size,
         rotation_block_size=args.rotation_block_size,
+        rotation_init=args.rotation_init,
         rotate=True,
         fp32_had=args.fp32_had,
     )
@@ -441,6 +452,7 @@ def main():
     if local_rank == 0:
         print(f"Using rotation compute dtype: {rotation_compute_dtype}")
         print(f"Using rotation block size: {cfg.rotation_block_size or 'full'}")
+        print(f"Using rotation init: {cfg.rotation_init}")
 
     if hf_config.model_type == "llama":
         if cfg.qk_matmul_bits < 16 or cfg.av_matmul_bits < 16:
@@ -465,12 +477,17 @@ def main():
         add_attention_matmul_bfp(model, cfg)
         for param in model.parameters():
             param.requires_grad = False
-        model.R1 = make_rotation_module(model.config.hidden_size, cfg.rotation_block_size)
+        model.R1 = make_rotation_module(
+            model.config.hidden_size,
+            cfg.rotation_block_size,
+            cfg.rotation_init,
+        )
         for i in range(model.config.num_hidden_layers):
             head_dim = model.config.hidden_size // model.config.num_attention_heads
             model.model.layers[i].self_attn.R2 = make_rotation_module(
                 head_dim,
                 cfg.rotation_block_size,
+                cfg.rotation_init,
             )
         rotation_params = rotation_module_params(model.R1) + [
             param

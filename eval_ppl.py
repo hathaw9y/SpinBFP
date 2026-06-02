@@ -57,6 +57,7 @@ def parse_args():
     parser.add_argument("--qk-matmul-bfp-group-size", type=int, default=32)
     parser.add_argument("--av-matmul-bfp-group-size", type=int, default=32)
     parser.add_argument("--rotation-block-size", type=int, default=0)
+    parser.add_argument("--rotation-init", choices=["random_hadamard", "hadamard"], default="random_hadamard")
     parser.add_argument("--random-rotation", action="store_true")
     parser.add_argument("--no-rotate", action="store_true")
     return parser.parse_args()
@@ -82,6 +83,7 @@ def load_config(args):
         qk_matmul_bfp_group_size=args.qk_matmul_bfp_group_size,
         av_matmul_bfp_group_size=args.av_matmul_bfp_group_size,
         rotation_block_size=args.rotation_block_size,
+        rotation_init=args.rotation_init,
         rotate=not args.no_rotate,
     )
 
@@ -421,8 +423,9 @@ def main():
     rotation_path = find_rotation_path(args, cfg)
     if cfg.rotate and args.random_rotation:
         print(
-            "Using random Hadamard rotations "
-            f"(rotation block size: {cfg.rotation_block_size or 'full'})."
+            "Using checkpoint-free rotations "
+            f"(rotation block size: {cfg.rotation_block_size or 'full'}, "
+            f"init: {cfg.rotation_init})."
         )
     elif cfg.rotate:
         print(f"Using rotation path: {rotation_path}")

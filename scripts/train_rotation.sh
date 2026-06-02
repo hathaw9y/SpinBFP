@@ -19,6 +19,7 @@ AV_MATMUL_BITS=${AV_MATMUL_BITS:-$KV_BITS}
 QK_MATMUL_BFP_GROUP_SIZE=${QK_MATMUL_BFP_GROUP_SIZE:-32}
 AV_MATMUL_BFP_GROUP_SIZE=${AV_MATMUL_BFP_GROUP_SIZE:-32}
 ROTATION_BLOCK_SIZE=${ROTATION_BLOCK_SIZE:-0}
+ROTATION_INIT=${ROTATION_INIT:-random_hadamard}
 NPROC_PER_NODE=${NPROC_PER_NODE:-2}
 MAX_STEPS=${MAX_STEPS:-100}
 MAX_LENGTH=${MAX_LENGTH:-2048}
@@ -41,6 +42,7 @@ torchrun --nnodes=1 --nproc_per_node="$NPROC_PER_NODE" train_rotation.py \
   --av-matmul-bits "$AV_MATMUL_BITS" \
   --av-matmul-bfp-group-size "$AV_MATMUL_BFP_GROUP_SIZE" \
   --rotation-block-size "$ROTATION_BLOCK_SIZE" \
+  --rotation-init "$ROTATION_INIT" \
   --max-length "$MAX_LENGTH" \
   --max-steps "$MAX_STEPS" \
   --per-device-train-batch-size "$PER_DEVICE_TRAIN_BATCH_SIZE" \

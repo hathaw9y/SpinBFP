@@ -15,6 +15,7 @@ from .hadamard import (
     apply_full_had,
     apply_head_had,
     apply_r2_to_weight,
+    hadamard,
     random_hadamard,
 )
 from utils.rotation_utils import apply_rotation_left, apply_rotation_right
@@ -30,15 +31,23 @@ class RotationModule(nn.Module):
 
 
 def _random_rotation(size, cfg, device):
+    rotation_init = getattr(cfg, "rotation_init", "random_hadamard")
+    if rotation_init == "hadamard":
+        init_fn = hadamard
+    elif rotation_init == "random_hadamard":
+        init_fn = random_hadamard
+    else:
+        raise ValueError(f"Unsupported rotation init: {rotation_init}")
+
     block_size = getattr(cfg, "rotation_block_size", 0)
     if block_size and block_size > 0:
         if size % block_size != 0:
             raise ValueError(f"rotation size {size} must be divisible by block size {block_size}")
         return torch.stack(
-            [random_hadamard(block_size, device) for _ in range(size // block_size)],
+            [init_fn(block_size, device) for _ in range(size // block_size)],
             dim=0,
         )
-    return random_hadamard(size, device)
+    return init_fn(size, device)
 
 
 def _copy_func_with_new_globals(func, globals_dict):
