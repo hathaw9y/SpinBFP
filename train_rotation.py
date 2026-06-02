@@ -60,7 +60,7 @@ def parse_args():
     parser.add_argument("--av-matmul-bits", type=int, default=None)
     parser.add_argument("--qk-matmul-bfp-group-size", type=int, default=32)
     parser.add_argument("--av-matmul-bfp-group-size", type=int, default=32)
-    parser.add_argument("--rotation-block-size", type=int, default=32)
+    parser.add_argument("--rotation-block-size", type=int, default=0)
     parser.add_argument("--fp32-had", action="store_true")
     parser.add_argument("--gradient-checkpointing", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--fsdp", default="")

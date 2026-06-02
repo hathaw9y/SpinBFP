@@ -28,6 +28,7 @@ from utils.quant_utils import (
 from bfp_llama.config import ExperimentConfig
 from bfp_llama.data import eval_tokens
 from utils.rotation_utils import apply_rotation_left, apply_rotation_right, rotation_total_dim
+from utils.utils import set_seed
 
 
 def parse_args():
@@ -40,6 +41,7 @@ def parse_args():
     parser.add_argument("--eval-nsamples", type=int, default=256)
     parser.add_argument("--batch-size", type=int, default=4)
     parser.add_argument("--max-length", type=int, default=2048)
+    parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--w-bits", type=int, default=4)
     parser.add_argument("--a-bits", type=int, default=4)
     parser.add_argument("--kv-bits", type=int, default=4)
@@ -54,7 +56,8 @@ def parse_args():
     parser.add_argument("--av-matmul-bits", type=int, default=None)
     parser.add_argument("--qk-matmul-bfp-group-size", type=int, default=32)
     parser.add_argument("--av-matmul-bfp-group-size", type=int, default=32)
-    parser.add_argument("--rotation-block-size", type=int, default=32)
+    parser.add_argument("--rotation-block-size", type=int, default=0)
+    parser.add_argument("--random-rotation", action="store_true")
     parser.add_argument("--no-rotate", action="store_true")
     return parser.parse_args()
 
@@ -63,6 +66,7 @@ def load_config(args):
     return ExperimentConfig(
         model=args.model,
         max_length=args.max_length,
+        seed=args.seed,
         w_bits=args.w_bits,
         a_bits=args.a_bits,
         kv_bits=args.kv_bits,
@@ -266,6 +270,10 @@ def find_rotation_path(args, cfg):
         if args.rotation_path is not None:
             print("--no-rotate is set; ignoring --rotation-path.")
         return None
+    if args.random_rotation:
+        if args.rotation_path is not None or args.experiment_dir is not None:
+            print("--random-rotation is set; ignoring rotation checkpoint arguments.")
+        return None
     if args.rotation_path is not None:
         return args.rotation_path
     if args.experiment_dir is None:
@@ -401,6 +409,7 @@ def main():
     set_bfp_exponent_rounding(args.bfp_exponent_rounding)
     set_quant_utils_bfp_exponent_rounding(args.bfp_exponent_rounding)
     cfg = load_config(args)
+    set_seed(cfg.seed)
     dataset_name = args.dataset or "wikitext2"
     dtype = resolve_dtype(args.dtype, args.model, token=args.access_token)
     rotation_compute_dtype = resolve_rotation_compute_dtype(args.rotation_compute_dtype)
@@ -410,7 +419,12 @@ def main():
 
     hf_config = AutoConfig.from_pretrained(args.model, token=args.access_token)
     rotation_path = find_rotation_path(args, cfg)
-    if cfg.rotate:
+    if cfg.rotate and args.random_rotation:
+        print(
+            "Using random Hadamard rotations "
+            f"(rotation block size: {cfg.rotation_block_size or 'full'})."
+        )
+    elif cfg.rotate:
         print(f"Using rotation path: {rotation_path}")
     else:
         print("Evaluating without rotation.")

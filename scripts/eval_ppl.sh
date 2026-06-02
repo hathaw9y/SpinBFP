@@ -3,9 +3,23 @@ set -euo pipefail
 
 MODEL=${1:?model name is required}
 NO_ROTATE=${NO_ROTATE:-0}
+RANDOM_ROTATION=${RANDOM_ROTATION:-0}
 EXTRA_ARGS=()
 if [[ "$NO_ROTATE" == "1" || "$NO_ROTATE" == "true" || "$NO_ROTATE" == "True" ]]; then
   EXTRA_ARGS+=(--no-rotate)
+  if [[ $# -ge 5 ]]; then
+    EXPERIMENT_DIR=${2:-}
+    W_BITS=${3:-4}
+    A_BITS=${4:-4}
+    KV_BITS=${5:-4}
+  else
+    EXPERIMENT_DIR=""
+    W_BITS=${2:-4}
+    A_BITS=${3:-4}
+    KV_BITS=${4:-4}
+  fi
+elif [[ "$RANDOM_ROTATION" == "1" || "$RANDOM_ROTATION" == "true" || "$RANDOM_ROTATION" == "True" ]]; then
+  EXTRA_ARGS+=(--random-rotation)
   if [[ $# -ge 5 ]]; then
     EXPERIMENT_DIR=${2:-}
     W_BITS=${3:-4}
@@ -26,6 +40,7 @@ fi
 DATASET=${DATASET:-wikitext2}
 BATCH_SIZE=${BATCH_SIZE:-4}
 EVAL_NSAMPLES=${EVAL_NSAMPLES:-256}
+SEED=${SEED:-0}
 BFP_GROUP_SIZE=${BFP_GROUP_SIZE:-32}
 BFP_EXPONENT_ROUNDING=${BFP_EXPONENT_ROUNDING:-floor}
 MODEL_DTYPE=${MODEL_DTYPE:-auto}
@@ -37,7 +52,7 @@ QK_MATMUL_BITS=${QK_MATMUL_BITS:-$KV_BITS}
 AV_MATMUL_BITS=${AV_MATMUL_BITS:-$KV_BITS}
 QK_MATMUL_BFP_GROUP_SIZE=${QK_MATMUL_BFP_GROUP_SIZE:-32}
 AV_MATMUL_BFP_GROUP_SIZE=${AV_MATMUL_BFP_GROUP_SIZE:-32}
-ROTATION_BLOCK_SIZE=${ROTATION_BLOCK_SIZE:-32}
+ROTATION_BLOCK_SIZE=${ROTATION_BLOCK_SIZE:-0}
 python eval_ppl.py \
   --model "$MODEL" \
   --experiment-dir "$EXPERIMENT_DIR" \
@@ -59,4 +74,5 @@ python eval_ppl.py \
   --dataset "$DATASET" \
   --batch-size "$BATCH_SIZE" \
   --eval-nsamples "$EVAL_NSAMPLES" \
+  --seed "$SEED" \
   "${EXTRA_ARGS[@]}"
