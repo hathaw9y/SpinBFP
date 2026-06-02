@@ -27,6 +27,7 @@ from utils.quant_utils import (
 )
 from bfp_llama.config import ExperimentConfig
 from bfp_llama.data import eval_tokens
+from utils.bfp_gptq import apply_bfp_gptq_weights
 from utils.rotation_utils import apply_rotation_left, apply_rotation_right, rotation_total_dim
 from utils.utils import set_seed
 
@@ -36,6 +37,7 @@ def parse_args():
     parser.add_argument("--model", required=True)
     parser.add_argument("--experiment-dir", default=None)
     parser.add_argument("--rotation-path", default=None)
+    parser.add_argument("--bfp-gptq-weight-path", default=None)
     parser.add_argument("--access-token", default=None)
     parser.add_argument("--dataset", choices=["wikitext2", "c4"], default=None)
     parser.add_argument("--eval-nsamples", type=int, default=256)
@@ -440,6 +442,9 @@ def main():
             trainable_rotations=False,
             rotation_path=rotation_path if cfg.rotate else None,
         )
+        if args.bfp_gptq_weight_path is not None:
+            loaded = apply_bfp_gptq_weights(model, args.bfp_gptq_weight_path)
+            print(f"Loaded BFP-GPTQ weights: {loaded} modules")
         model.cuda()
         tokenizer = load_llama_tokenizer(args.model, cfg.max_length, token=args.access_token)
         eval_fn = evaluate_layerwise
@@ -452,6 +457,9 @@ def main():
             rotation_path=rotation_path if cfg.rotate else None,
             compute_dtype=rotation_compute_dtype,
         )
+        if args.bfp_gptq_weight_path is not None:
+            loaded = apply_bfp_gptq_weights(model, args.bfp_gptq_weight_path)
+            print(f"Loaded BFP-GPTQ weights: {loaded} modules")
         tokenizer = load_opt_tokenizer(args.model, cfg.max_length, token=args.access_token)
         eval_fn = evaluate_forward
     else:

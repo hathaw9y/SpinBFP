@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 from typing import Callable
 
 import torch
@@ -161,37 +162,126 @@ def bfp_gptq(
 
     W_work = W.float()
     X_work = X.float()
-    H = 2.0 * (X_work.t() @ X_work)
-
-    if reorder:
-        W_gptq, perm = static_act_reorder(W_work, H, group_size)
-        H_gptq = H[perm][:, perm]
-        inv_perm = torch.argsort(perm)
-    else:
-        W_gptq = W_work
-        H_gptq = H
-        perm = torch.arange(W.shape[1], device=W.device)
-        inv_perm = perm
-
-    scales = _bfp_group_scales(W_gptq, bits, group_size, clip_ratio)
-
-    def quantize_col(col: torch.Tensor, col_idx: int) -> torch.Tensor:
-        group_idx = col_idx // group_size
-        return _quantize_bfp_column_fixed_scale(
-            col,
-            scales[:, group_idx, :],
-            bits,
+    if X_work.shape[1] % group_size != 0:
+        raise ValueError(
+            f"X columns {X_work.shape[1]} must be divisible by group_size {group_size}."
         )
+    x_groups = X_work.reshape(-1, X_work.shape[1] // group_size, group_size)
+    H_blocks = 2.0 * torch.einsum("nkg,nkh->kgh", x_groups, x_groups)
+    return bfp_gptq_from_block_hessians(
+        W_work,
+        H_blocks,
+        bits=bits,
+        group_size=group_size,
+        damp_pct=damp_pct,
+        clip_ratio=clip_ratio,
+        reorder=reorder,
+    )
 
-    Wq_gptq = gptq(W_gptq, H_gptq, quantize_col, damp_pct=damp_pct)
-    Wq = Wq_gptq[:, inv_perm]
+
+def bfp_gptq_from_block_hessians(
+    W: torch.Tensor,
+    H_blocks: torch.Tensor,
+    bits: int = 4,
+    group_size: int = 32,
+    damp_pct: float = 0.01,
+    clip_ratio: float = 1.0,
+    reorder: bool = True,
+) -> dict:
+    """
+    BFP-GPTQ using one Hessian block per BFP group.
+
+    H_blocks has shape (in_features / group_size, group_size, group_size). This
+    keeps the correction local to the same columns that share a BFP scale.
+    """
+    if W.dim() != 2:
+        raise ValueError(f"W must be 2D, got shape {tuple(W.shape)}.")
+    if W.shape[1] % group_size != 0:
+        raise ValueError(
+            f"W columns {W.shape[1]} must be divisible by group_size {group_size}."
+        )
+    expected = (W.shape[1] // group_size, group_size, group_size)
+    if tuple(H_blocks.shape) != expected:
+        raise ValueError(f"H_blocks must have shape {expected}, got {tuple(H_blocks.shape)}.")
+
+    W_work = W.float()
+    W_quant = torch.empty_like(W_work)
+    perms = []
+    scales = []
+
+    for group_idx, start in enumerate(range(0, W.shape[1], group_size)):
+        end = start + group_size
+        W_block = W_work[:, start:end]
+        H_block = H_blocks[group_idx].to(device=W.device, dtype=torch.float32)
+
+        if reorder:
+            local_order = torch.argsort(H_block.diag(), descending=True)
+            inv_order = torch.argsort(local_order)
+            W_gptq = W_block[:, local_order]
+            H_gptq = H_block[local_order][:, local_order]
+        else:
+            local_order = torch.arange(group_size, device=W.device)
+            inv_order = local_order
+            W_gptq = W_block
+            H_gptq = H_block
+
+        group_scale = _bfp_group_scales(W_gptq, bits, group_size, clip_ratio)[:, 0, :]
+
+        def quantize_col(col: torch.Tensor, _col_idx: int) -> torch.Tensor:
+            return _quantize_bfp_column_fixed_scale(col, group_scale, bits)
+
+        Wq_gptq = gptq(W_gptq, H_gptq, quantize_col, damp_pct=damp_pct)
+        W_quant[:, start:end] = Wq_gptq[:, inv_order]
+        perms.append(local_order + start)
+        scales.append(group_scale.unsqueeze(1))
+
+    perm = torch.cat(perms)
     return {
-        "W_quant": Wq.to(torch.float32),
-        "H": H.to(torch.float32),
-        "scales": scales.to(torch.float32),
+        "W_quant": W_quant.to(torch.float32),
+        "H_blocks": H_blocks.to(torch.float32),
+        "scales": torch.cat(scales, dim=1).to(torch.float32),
         "permutation": perm,
         "bits": bits,
         "group_size": group_size,
         "clip_ratio": clip_ratio,
         "reorder": reorder,
     }
+
+
+def apply_bfp_gptq_weights(model, state_or_path, strict: bool = True):
+    if isinstance(state_or_path, (str, bytes, os.PathLike)):
+        state = torch.load(state_or_path, map_location="cpu")
+    else:
+        state = state_or_path
+    weights = state.get("weights", state)
+    modules = dict(model.named_modules())
+    missing = []
+    loaded = 0
+    for name, weight in weights.items():
+        module = modules.get(name)
+        if module is None:
+            missing.append(name)
+            continue
+        target_shape = getattr(module, "weight", None)
+        if target_shape is not None and tuple(module.weight.shape) != tuple(weight.shape):
+            raise ValueError(
+                f"BFP-GPTQ weight shape mismatch for {name}: "
+                f"{tuple(weight.shape)} != {tuple(module.weight.shape)}"
+            )
+        tensor = weight.detach().to(dtype=torch.float32)
+        if hasattr(module, "bfp_gptq_weight"):
+            module.bfp_gptq_weight.data.copy_(tensor.to(module.bfp_gptq_weight.device))
+        else:
+            module.register_buffer("bfp_gptq_weight", tensor)
+        loaded += 1
+    if strict and missing:
+        raise KeyError(f"Missing modules for BFP-GPTQ weights: {missing[:5]}")
+    return loaded
+
+
+def bfp_gptq_weight_state(model) -> dict:
+    weights = {}
+    for name, module in model.named_modules():
+        if hasattr(module, "bfp_gptq_weight"):
+            weights[name] = module.bfp_gptq_weight.detach().cpu()
+    return weights
