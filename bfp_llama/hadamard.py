@@ -31,7 +31,8 @@ def apply_head_had(x, group_size):
 
 
 def apply_exact_had_to_linear(linear, group_size):
-    hadamard_utils.apply_exact_had_to_linear(linear, had_dim=group_size, output=False)
+    had_dim = group_size if group_size is not None and group_size > 0 else -1
+    hadamard_utils.apply_exact_had_to_linear(linear, had_dim=had_dim, output=False)
 
 
 def apply_r2_to_weight(weight, r2, transpose):
