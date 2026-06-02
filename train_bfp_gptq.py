@@ -266,7 +266,8 @@ def run_layer(layer, inps, layer_kwargs, device):
 def apply_layer_bfp_gptq(layer, layer_idx, stats, args):
     from utils.bfp_gptq import bfp_gptq_from_block_hessians
 
-    saved = {}
+    saved_weights = {}
+    saved_quantizers = {}
     for full_name, module in tqdm(_layer_targets(layer, layer_idx), desc=f"GPTQ layer {layer_idx}", leave=False):
         W_eff = module._effective_weight().detach().float()
         result = bfp_gptq_from_block_hessians(
@@ -283,14 +284,23 @@ def apply_layer_bfp_gptq(layer, layer_idx, stats, args):
             module.bfp_gptq_weight.data.copy_(W_q)
         else:
             module.register_buffer("bfp_gptq_weight", W_q)
-        saved[full_name] = W_q.detach().cpu()
-    return saved
+        saved_weights[full_name] = W_q.detach().cpu()
+        saved_quantizers[full_name] = {
+            "scales": result["scales"].detach().cpu(),
+            "permutation": result["permutation"].detach().cpu(),
+            "bits": result["bits"],
+            "group_size": result["group_size"],
+            "clip_ratio": result["clip_ratio"],
+            "reorder": result["reorder"],
+        }
+    return saved_weights, saved_quantizers
 
 
 @torch.no_grad()
 def calibrate_bfp_gptq(model, batches, args, device):
     inps, layer_kwargs = capture_first_layer_inputs(model, batches, device)
     all_weights = {}
+    all_quantizers = {}
     layers = model.model.layers
 
     for layer_idx in tqdm(range(len(layers)), desc="BFP-GPTQ layers"):
@@ -301,13 +311,15 @@ def calibrate_bfp_gptq(model, batches, args, device):
         for handle in handles:
             handle.remove()
 
-        all_weights.update(apply_layer_bfp_gptq(layer, layer_idx, stats, args))
+        layer_weights, layer_quantizers = apply_layer_bfp_gptq(layer, layer_idx, stats, args)
+        all_weights.update(layer_weights)
+        all_quantizers.update(layer_quantizers)
         inps = run_layer(layer, inps, layer_kwargs, device)
 
         layers[layer_idx] = layer.cpu()
         del layer, stats
         torch.cuda.empty_cache()
-    return all_weights
+    return all_weights, all_quantizers
 
 
 def main():
@@ -351,7 +363,7 @@ def main():
         for i in range(0, len(calib), args.batch_size)
     ]
 
-    weights = calibrate_bfp_gptq(model, batches, args, device)
+    weights, quantizers = calibrate_bfp_gptq(model, batches, args, device)
     output_path = Path(args.output_path)
     output_path.parent.mkdir(parents=True, exist_ok=True)
     torch.save(
@@ -362,12 +374,15 @@ def main():
                 "runtime_bits": (args.w_bits, args.a_bits, args.kv_bits),
                 "w_gptq_bits": args.w_gptq_bits,
                 "w_gptq_group_size": args.w_gptq_group_size,
+                "w_gptq_scale_source": "effective_rotated_weight_before_gptq",
+                "w_gptq_scale_rounding": "floor_log2_absmax",
                 "calib_dataset": args.calib_dataset,
                 "calib_samples": args.calib_samples,
                 "seqlen": args.seqlen,
                 "seed": args.seed,
             },
             "weights": weights,
+            "quantizers": quantizers,
         },
         output_path,
     )

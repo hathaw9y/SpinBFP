@@ -141,11 +141,12 @@ class BfpRotationLinear(nn.Module):
     def forward(self, x):
         x_dtype = x.dtype
         x = self._quant_input(x)
-        if hasattr(self, "bfp_gptq_weight"):
+        use_gptq_weight = hasattr(self, "bfp_gptq_weight")
+        if use_gptq_weight:
             weight = self.bfp_gptq_weight.to(device=self.linear.weight.device, dtype=self.linear.weight.dtype)
         else:
             weight = self._effective_weight()
-        if self.role != "lm_head":
+        if self.role != "lm_head" and not use_gptq_weight:
             weight = bfp_quant_dequant(weight, self.cfg.w_bits, self.cfg.w_bfp_group_size)
         out = nn.functional.linear(x, weight, self.linear.bias).to(x_dtype)
         if self.role == "v_proj":
@@ -218,11 +219,13 @@ class OptBfpRotationLinear(nn.Module):
             return nn.functional.linear(x, weight, self.linear.bias).to(x_dtype)
 
         x = bfp_quant_dequant(x, self.cfg.a_bits, self.cfg.a_bfp_group_size)
-        if hasattr(self, "bfp_gptq_weight"):
+        use_gptq_weight = hasattr(self, "bfp_gptq_weight")
+        if use_gptq_weight:
             weight = self.bfp_gptq_weight.to(device=self.linear.weight.device, dtype=self.linear.weight.dtype)
         else:
             weight = self._effective_weight()
-        weight = bfp_quant_dequant(weight, self.cfg.w_bits, self.cfg.w_bfp_group_size)
+        if not use_gptq_weight:
+            weight = bfp_quant_dequant(weight, self.cfg.w_bits, self.cfg.w_bfp_group_size)
         out = nn.functional.linear(x, weight, self.linear.bias).to(x_dtype)
         if self.role == "v_proj":
             out = bfp_quant_dequant(out, self.cfg.kv_bits, self.cfg.kv_bfp_group_size)
