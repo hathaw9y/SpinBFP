@@ -16,6 +16,7 @@ def parse_args():
         description="Calibrate BFP-GPTQ weights under an existing BFP/rotation runtime."
     )
     parser.add_argument("--model", required=True)
+    parser.add_argument("--experiment-dir", default=None)
     parser.add_argument("--rotation-path", default=None)
     parser.add_argument("--output-path", required=True)
     parser.add_argument("--access-token", default=None)
@@ -101,6 +102,35 @@ def make_cfg(args):
         rotation_init=args.rotation_init,
         rotate=not args.no_rotate,
     )
+
+
+def find_rotation_path(args, cfg):
+    if not cfg.rotate:
+        return None
+    if args.rotation_path is not None:
+        return args.rotation_path
+    if args.experiment_dir is None:
+        raise FileNotFoundError(
+            "Pass --rotation-path or --experiment-dir for BFP-GPTQ with rotation."
+        )
+
+    from bfp_llama.modeling import rotation_filename
+
+    experiment_dir = Path(args.experiment_dir)
+    expected = experiment_dir / rotation_filename(cfg)
+    if expected.exists():
+        return str(expected)
+
+    matches = sorted(experiment_dir.glob("R_*_*_*_*.bin"))
+    if len(matches) == 1:
+        return str(matches[0])
+    if len(matches) > 1:
+        names = ", ".join(path.name for path in matches)
+        raise FileNotFoundError(
+            f"{expected.name} not found and multiple rotation files exist: {names}. "
+            "Pass --rotation-path explicitly."
+        )
+    raise FileNotFoundError(f"rotation file not found: {expected}")
 
 
 def _tensor_to(x, device):
@@ -271,13 +301,14 @@ def main():
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     dtype = resolve_dtype(args.dtype, args.model, token=args.access_token)
     cfg = make_cfg(args)
+    rotation_path = find_rotation_path(args, cfg)
 
     print(f"Loading model: {args.model}")
     print(f"Runtime quantization: {args.w_bits}_{args.a_bits}_{args.kv_bits}")
     print(f"BFP-GPTQ weight quantization: {args.w_gptq_bits}-bit, group={args.w_gptq_group_size}")
     print(f"QK/AV matmul BFP bits: {args.qk_matmul_bits}/{args.av_matmul_bits}")
     if cfg.rotate:
-        print(f"Using rotation path: {args.rotation_path}")
+        print(f"Using rotation path: {rotation_path}")
 
     tokenizer = load_llama_tokenizer(args.model, args.seqlen, token=args.access_token)
     model = load_llama_causal_lm(args.model, dtype, token=args.access_token, cfg=cfg)
@@ -285,7 +316,7 @@ def main():
         model,
         cfg,
         trainable_rotations=False,
-        rotation_path=args.rotation_path,
+        rotation_path=rotation_path,
     )
     model.eval()
 
@@ -308,7 +339,7 @@ def main():
         {
             "metadata": {
                 "model": args.model,
-                "rotation_path": args.rotation_path,
+                "rotation_path": rotation_path,
                 "runtime_bits": (args.w_bits, args.a_bits, args.kv_bits),
                 "w_gptq_bits": args.w_gptq_bits,
                 "w_gptq_group_size": args.w_gptq_group_size,
@@ -326,4 +357,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
