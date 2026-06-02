@@ -264,7 +264,11 @@ def run_layer(layer, inps, layer_kwargs, device):
 
 
 def apply_layer_bfp_gptq(layer, layer_idx, stats, args):
-    from utils.bfp_gptq import bfp_gptq_from_block_hessians
+    from utils.bfp_gptq import (
+        bfp_gptq_from_block_hessians,
+        block_hessian_weighted_error,
+        quantize_bfp,
+    )
 
     saved_weights = {}
     saved_quantizers = {}
@@ -279,7 +283,27 @@ def apply_layer_bfp_gptq(layer, layer_idx, stats, args):
             clip_ratio=args.w_gptq_clip_ratio,
             reorder=not args.no_reorder,
         )
-        W_q = result["W_quant"].to(device=module.linear.weight.device, dtype=torch.float32)
+        W_gptq = result["W_quant"].to(device=module.linear.weight.device, dtype=torch.float32)
+        W_rtn = quantize_bfp(
+            W_eff,
+            bits=args.w_gptq_bits,
+            group_size=args.w_gptq_group_size,
+            clip_ratio=args.w_gptq_clip_ratio,
+        ).to(device=module.linear.weight.device, dtype=torch.float32)
+        gptq_error = block_hessian_weighted_error(
+            W_eff,
+            W_gptq,
+            stats[full_name],
+            args.w_gptq_group_size,
+        )
+        rtn_error = block_hessian_weighted_error(
+            W_eff,
+            W_rtn,
+            stats[full_name],
+            args.w_gptq_group_size,
+        )
+        use_rtn = bool(rtn_error <= gptq_error)
+        W_q = W_rtn if use_rtn else W_gptq
         if hasattr(module, "bfp_gptq_weight"):
             module.bfp_gptq_weight.data.copy_(W_q)
         else:
@@ -292,6 +316,9 @@ def apply_layer_bfp_gptq(layer, layer_idx, stats, args):
             "group_size": result["group_size"],
             "clip_ratio": result["clip_ratio"],
             "reorder": result["reorder"],
+            "selected": "rtn" if use_rtn else "gptq",
+            "rtn_error": float(rtn_error.detach().cpu()),
+            "gptq_error": float(gptq_error.detach().cpu()),
         }
     return saved_weights, saved_quantizers
 
@@ -376,6 +403,7 @@ def main():
                 "w_gptq_group_size": args.w_gptq_group_size,
                 "w_gptq_scale_source": "effective_rotated_weight_before_gptq",
                 "w_gptq_scale_rounding": "floor_log2_absmax",
+                "w_gptq_rtn_fallback": True,
                 "calib_dataset": args.calib_dataset,
                 "calib_samples": args.calib_samples,
                 "seqlen": args.seqlen,

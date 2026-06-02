@@ -11,7 +11,14 @@ if "fast_hadamard_transform" not in sys.modules:
     sys.modules["fast_hadamard_transform"] = fast_hadamard_transform
 
 from bfp_llama.modeling import BfpRotationLinear
-from utils.bfp_gptq import _bfp_group_scales, bfp_gptq, bfp_gptq_from_block_hessians, gptq, quantize_bfp
+from utils.bfp_gptq import (
+    _bfp_group_scales,
+    bfp_gptq,
+    bfp_gptq_from_block_hessians,
+    block_hessian_weighted_error,
+    gptq,
+    quantize_bfp,
+)
 
 
 def reference_bfp(x, bits=4, group_size=32, clip_ratio=1.0):
@@ -111,6 +118,29 @@ class BFPGPTQTest(unittest.TestCase):
         expected = torch.nn.functional.linear(x, gptq_weight)
 
         self.assertTrue(torch.equal(actual, expected))
+
+    def test_block_hessian_weighted_error_matches_output_error(self):
+        torch.manual_seed(5)
+        W = torch.randn(3, 4)
+        W_quant = W + 0.05 * torch.randn(3, 4)
+        X = torch.randn(7, 4)
+        group_size = 2
+        H_blocks = 2.0 * torch.einsum(
+            "nkg,nkh->kgh",
+            X.reshape(-1, W.shape[1] // group_size, group_size),
+            X.reshape(-1, W.shape[1] // group_size, group_size),
+        )
+
+        actual = block_hessian_weighted_error(W, W_quant, H_blocks, group_size)
+        diff = W_quant - W
+        expected = torch.zeros(())
+        for start in range(0, W.shape[1], group_size):
+            end = start + group_size
+            expected = expected + 2.0 * torch.sum(
+                (X[:, start:end] @ diff[:, start:end].t()) ** 2
+            )
+
+        self.assertTrue(torch.allclose(actual, expected, atol=1e-5))
 
 
 if __name__ == "__main__":

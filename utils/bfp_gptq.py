@@ -248,6 +248,34 @@ def bfp_gptq_from_block_hessians(
     }
 
 
+def block_hessian_weighted_error(
+    W: torch.Tensor,
+    W_quant: torch.Tensor,
+    H_blocks: torch.Tensor,
+    group_size: int,
+) -> torch.Tensor:
+    if W.shape != W_quant.shape:
+        raise ValueError(f"W and W_quant shapes must match, got {tuple(W.shape)} and {tuple(W_quant.shape)}.")
+    if W.dim() != 2:
+        raise ValueError(f"W must be 2D, got shape {tuple(W.shape)}.")
+    if W.shape[1] % group_size != 0:
+        raise ValueError(
+            f"W columns {W.shape[1]} must be divisible by group_size {group_size}."
+        )
+    expected = (W.shape[1] // group_size, group_size, group_size)
+    if tuple(H_blocks.shape) != expected:
+        raise ValueError(f"H_blocks must have shape {expected}, got {tuple(H_blocks.shape)}.")
+
+    total = torch.zeros((), device=W.device, dtype=torch.float32)
+    diff = W_quant.float() - W.float()
+    for group_idx, start in enumerate(range(0, W.shape[1], group_size)):
+        end = start + group_size
+        group_diff = diff[:, start:end]
+        H = H_blocks[group_idx].to(device=W.device, dtype=torch.float32)
+        total = total + torch.einsum("og,gh,oh->", group_diff, H, group_diff)
+    return total
+
+
 def apply_bfp_gptq_weights(model, state_or_path, strict: bool = True):
     if isinstance(state_or_path, (str, bytes, os.PathLike)):
         state = torch.load(state_or_path, map_location="cpu")
