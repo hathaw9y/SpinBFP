@@ -30,8 +30,8 @@ def parse_args():
     parser.add_argument("--a-bits", type=int, default=4)
     parser.add_argument("--kv-bits", type=int, default=4)
     parser.add_argument("--bfp-group-size", type=int, default=32)
-    parser.add_argument("--qk-matmul-bits", type=int, default=16)
-    parser.add_argument("--av-matmul-bits", type=int, default=16)
+    parser.add_argument("--qk-matmul-bits", type=int, default=None)
+    parser.add_argument("--av-matmul-bits", type=int, default=None)
     parser.add_argument("--qk-matmul-bfp-group-size", type=int, default=32)
     parser.add_argument("--av-matmul-bfp-group-size", type=int, default=32)
     parser.add_argument("--online-had-group-size", type=int, default=32)
@@ -94,8 +94,8 @@ def make_cfg(args):
         online_had_group_size=args.online_had_group_size,
         w_down_had_group_size=args.w_down_had_group_size,
         qk_had_group_size=args.qk_had_group_size,
-        qk_matmul_bits=args.qk_matmul_bits,
-        av_matmul_bits=args.av_matmul_bits,
+        qk_matmul_bits=args.qk_matmul_bits if args.qk_matmul_bits is not None else args.kv_bits,
+        av_matmul_bits=args.av_matmul_bits if args.av_matmul_bits is not None else args.kv_bits,
         qk_matmul_bfp_group_size=args.qk_matmul_bfp_group_size,
         av_matmul_bfp_group_size=args.av_matmul_bfp_group_size,
         rotation_block_size=args.rotation_block_size,
@@ -306,7 +306,7 @@ def main():
     print(f"Loading model: {args.model}")
     print(f"Runtime quantization: {args.w_bits}_{args.a_bits}_{args.kv_bits}")
     print(f"BFP-GPTQ weight quantization: {args.w_gptq_bits}-bit, group={args.w_gptq_group_size}")
-    print(f"QK/AV matmul BFP bits: {args.qk_matmul_bits}/{args.av_matmul_bits}")
+    print(f"QK/AV matmul BFP bits: {cfg.qk_matmul_bits}/{cfg.av_matmul_bits}")
     if cfg.rotate:
         print(f"Using rotation path: {rotation_path}")
 
