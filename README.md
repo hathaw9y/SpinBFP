@@ -8,16 +8,16 @@
 
 ### 1.1 Block Floating Point Quantization
 
-본 실험에서 사용하는 BFP는 block 단위로 shared exponent scale을 잡고, 각 원소의 mantissa를 정해진 bit 수로 fake quantize한다. 기본 block size는 32이다.
+본 실험에서 사용하는 BFP는 block 단위로 shared exponent scale을 잡고, 각 원소의 signed mantissa를 정해진 bit 수로 fake quantize한다. 기본 block size는 32이다.
 
 ```text
 scale = 2 ^ floor(log2(absmax(block)))
 q = round(abs(x) / scale * denom)
 q = clamp(q, 0, 2^bits - 1)
-y = sign(x) * scale * q / denom
+y = scale * q / denom
 ```
 
-여기서 `denom = (2^bits) / 2`이다. 예를 들어 4-bit BFP에서는 mantissa quant 값의 범위가 `0..15`이고, sign은 별도로 적용된다. 즉 hidden bit을 포함한 mantissa의 상위 bit를 round-to-nearest 방식으로 근사한다.
+여기서 `denom = 2^(bits - 1)`이고 `q`는 signed integer 범위 `[-2^(bits-1), 2^(bits-1)-1]`로 clamp된다. 예를 들어 4-bit BFP에서는 quant 값의 범위가 `-8..7`이며 sign bit가 bit 수에 포함된다.
 
 이 구현은 실제 low-bit kernel이 아니라 fake quantization이다. 따라서 메모리 절감 목적의 압축 저장이 아니라, BFP 수치 효과를 학습/평가 그래프 안에서 시뮬레이션하는 방식이다.
 
