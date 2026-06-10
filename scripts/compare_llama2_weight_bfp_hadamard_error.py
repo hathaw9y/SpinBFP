@@ -138,6 +138,28 @@ def _bfp_topk_shared_scale(x, *, maxq, finfo, clip_ratio=1.0, topk=1):
     return torch.clamp(scale, min=finfo.tiny, max=finfo.max)
 
 
+def _bfp_scale_and_shift(x, *, maxq, finfo, clip_ratio, scale_method, topk):
+    if scale_method == "absmax":
+        xmax = torch.amax(torch.abs(x), dim=-1, keepdim=True) * clip_ratio
+        safe_xmax = torch.where(xmax == 0, torch.ones_like(xmax), xmax)
+        shared_shift = torch.ceil(torch.log2(safe_xmax / maxq))
+        scale = 2 ** shared_shift
+        scale = torch.clamp(scale, min=finfo.tiny, max=finfo.max)
+        scale = torch.where(xmax == 0, torch.ones_like(scale), scale)
+        shared_shift = torch.where(xmax == 0, torch.zeros_like(shared_shift), shared_shift)
+        return scale, shared_shift
+    if scale_method == "topk":
+        scale = _bfp_topk_shared_scale(
+            x,
+            maxq=maxq,
+            finfo=finfo,
+            clip_ratio=clip_ratio,
+            topk=topk,
+        )
+        return scale, torch.log2(scale)
+    raise ValueError(f"Unknown BFP scale method: {scale_method}.")
+
+
 def bfp_fake_quant(
     x,
     bits=4,
@@ -167,22 +189,14 @@ def bfp_fake_quant(
         x = F.pad(x, (0, pad))
 
     x = x.reshape(-1, x.shape[-1] // block_size, block_size)
-    if scale_method == "absmax":
-        xmax = torch.amax(torch.abs(x), dim=-1, keepdim=True) * clip_ratio
-        safe_xmax = torch.where(xmax == 0, torch.ones_like(xmax), xmax)
-        scale = 2 ** torch.ceil(torch.log2(safe_xmax / maxq))
-        scale = torch.clamp(scale, min=finfo.tiny, max=finfo.max)
-        scale = torch.where(xmax == 0, torch.ones_like(scale), scale)
-    elif scale_method == "topk":
-        scale = _bfp_topk_shared_scale(
-            x,
-            maxq=maxq,
-            finfo=finfo,
-            clip_ratio=clip_ratio,
-            topk=topk,
-        )
-    else:
-        raise ValueError(f"Unknown BFP scale method: {scale_method}.")
+    scale, _ = _bfp_scale_and_shift(
+        x,
+        maxq=maxq,
+        finfo=finfo,
+        clip_ratio=clip_ratio,
+        scale_method=scale_method,
+        topk=topk,
+    )
 
     q = torch.clamp(torch.round(x / scale), minq, maxq)
     q = torch.nan_to_num(q, nan=0.0, posinf=maxq, neginf=minq)
@@ -193,6 +207,48 @@ def bfp_fake_quant(
     if pad:
         xhat = xhat[..., : orig_shape[-1]]
     return xhat.reshape(orig_shape).to(dtype=orig_dtype)
+
+
+def bfp_shift_stats(
+    x,
+    bits=4,
+    block_size=BFP_DEFAULT_BLOCK_SIZE,
+    clip_ratio=1.0,
+    scale_method="absmax",
+    topk=1,
+):
+    if bits < 2:
+        raise ValueError(f"BFP bits must be at least 2, got {bits}.")
+    if block_size <= 0:
+        raise ValueError(f"BFP block size must be positive, got {block_size}.")
+
+    maxq = 2 ** (bits - 1) - 1
+    compute_dtype = _compute_dtype(x.dtype)
+    x = x.to(dtype=compute_dtype)
+    finfo = torch.finfo(compute_dtype)
+    x = torch.nan_to_num(x, nan=0.0, posinf=finfo.max, neginf=-finfo.max)
+
+    pad = (block_size - x.shape[-1] % block_size) % block_size
+    if pad:
+        x = F.pad(x, (0, pad))
+
+    x = x.reshape(-1, x.shape[-1] // block_size, block_size)
+    _, shared_shift = _bfp_scale_and_shift(
+        x,
+        maxq=maxq,
+        finfo=finfo,
+        clip_ratio=clip_ratio,
+        scale_method=scale_method,
+        topk=topk,
+    )
+    shared_shift = shared_shift.float()
+    return {
+        "shift_blocks": shared_shift.numel(),
+        "shift_sum": shared_shift.sum().item(),
+        "shift_abs_sum": shared_shift.abs().sum().item(),
+        "shift_min": shared_shift.min().item(),
+        "shift_max": shared_shift.max().item(),
+    }
 
 
 def _power2_hadamard_transform(x):
@@ -355,6 +411,14 @@ def row_for_weight(name, module, args):
         topk=args.w_topk,
     )
     no_rot_sse = (weight_float - q.float()).pow(2).sum().item()
+    no_rot_shift = bfp_shift_stats(
+        weight,
+        bits=args.w_bits,
+        block_size=bfp_block_size,
+        clip_ratio=args.w_clip_ratio,
+        scale_method=args.w_scale_method,
+        topk=args.w_topk,
+    )
     del q
 
     rotated = rotate_weight(
@@ -374,6 +438,14 @@ def row_for_weight(name, module, args):
         topk=args.w_topk,
     )
     rot_sse = (rotated_float - q_rot.float()).pow(2).sum().item()
+    rot_shift = bfp_shift_stats(
+        rotated,
+        bits=args.w_bits,
+        block_size=bfp_block_size,
+        clip_ratio=args.w_clip_ratio,
+        scale_method=args.w_scale_method,
+        topk=args.w_topk,
+    )
     del rotated, q_rot
 
     key = stat_key(name, args.group_by)
@@ -406,6 +478,27 @@ def row_for_weight(name, module, args):
         "random_rot_snr_db": snr_db(signal_sum_sq, rot_sse),
         "no_rot_absmax": weight_float.abs().max().item(),
         "random_rot_absmax": rotated_float.abs().max().item(),
+        "shift_blocks": no_rot_shift["shift_blocks"],
+        "no_rot_shift_sum": no_rot_shift["shift_sum"],
+        "random_rot_shift_sum": rot_shift["shift_sum"],
+        "no_rot_abs_shift_sum": no_rot_shift["shift_abs_sum"],
+        "random_rot_abs_shift_sum": rot_shift["shift_abs_sum"],
+        "no_rot_shift_mean": no_rot_shift["shift_sum"] / max(no_rot_shift["shift_blocks"], 1),
+        "random_rot_shift_mean": rot_shift["shift_sum"] / max(rot_shift["shift_blocks"], 1),
+        "shift_mean_delta": (
+            rot_shift["shift_sum"] / max(rot_shift["shift_blocks"], 1)
+            - no_rot_shift["shift_sum"] / max(no_rot_shift["shift_blocks"], 1)
+        ),
+        "no_rot_abs_shift_mean": no_rot_shift["shift_abs_sum"] / max(no_rot_shift["shift_blocks"], 1),
+        "random_rot_abs_shift_mean": rot_shift["shift_abs_sum"] / max(rot_shift["shift_blocks"], 1),
+        "abs_shift_mean_delta": (
+            rot_shift["shift_abs_sum"] / max(rot_shift["shift_blocks"], 1)
+            - no_rot_shift["shift_abs_sum"] / max(no_rot_shift["shift_blocks"], 1)
+        ),
+        "no_rot_shift_min": no_rot_shift["shift_min"],
+        "no_rot_shift_max": no_rot_shift["shift_max"],
+        "random_rot_shift_min": rot_shift["shift_min"],
+        "random_rot_shift_max": rot_shift["shift_max"],
     }
 
 
@@ -439,6 +532,15 @@ def aggregate_rows(rows, group_by):
                 "random_rot_sse": 0.0,
                 "no_rot_absmax": 0.0,
                 "random_rot_absmax": 0.0,
+                "shift_blocks": 0,
+                "no_rot_shift_sum": 0.0,
+                "random_rot_shift_sum": 0.0,
+                "no_rot_abs_shift_sum": 0.0,
+                "random_rot_abs_shift_sum": 0.0,
+                "no_rot_shift_min": float("inf"),
+                "no_rot_shift_max": -float("inf"),
+                "random_rot_shift_min": float("inf"),
+                "random_rot_shift_max": -float("inf"),
             }
         acc = grouped[key]
         acc["modules"] += row["modules"]
@@ -448,6 +550,15 @@ def aggregate_rows(rows, group_by):
         acc["random_rot_sse"] += row["random_rot_sse"]
         acc["no_rot_absmax"] = max(acc["no_rot_absmax"], row["no_rot_absmax"])
         acc["random_rot_absmax"] = max(acc["random_rot_absmax"], row["random_rot_absmax"])
+        acc["shift_blocks"] += row["shift_blocks"]
+        acc["no_rot_shift_sum"] += row["no_rot_shift_sum"]
+        acc["random_rot_shift_sum"] += row["random_rot_shift_sum"]
+        acc["no_rot_abs_shift_sum"] += row["no_rot_abs_shift_sum"]
+        acc["random_rot_abs_shift_sum"] += row["random_rot_abs_shift_sum"]
+        acc["no_rot_shift_min"] = min(acc["no_rot_shift_min"], row["no_rot_shift_min"])
+        acc["no_rot_shift_max"] = max(acc["no_rot_shift_max"], row["no_rot_shift_max"])
+        acc["random_rot_shift_min"] = min(acc["random_rot_shift_min"], row["random_rot_shift_min"])
+        acc["random_rot_shift_max"] = max(acc["random_rot_shift_max"], row["random_rot_shift_max"])
     return [finalize_acc(acc) for acc in grouped.values()]
 
 
@@ -463,6 +574,13 @@ def finalize_acc(acc):
     acc["reduction_pct"] = (1.0 - ratio) * 100.0 if math.isfinite(ratio) else float("-inf")
     acc["no_rot_snr_db"] = snr_db(acc["signal_sum_sq"], acc["no_rot_sse"])
     acc["random_rot_snr_db"] = snr_db(acc["signal_sum_sq"], acc["random_rot_sse"])
+    shift_blocks = max(acc.get("shift_blocks", 0), 1)
+    acc["no_rot_shift_mean"] = acc["no_rot_shift_sum"] / shift_blocks
+    acc["random_rot_shift_mean"] = acc["random_rot_shift_sum"] / shift_blocks
+    acc["shift_mean_delta"] = acc["random_rot_shift_mean"] - acc["no_rot_shift_mean"]
+    acc["no_rot_abs_shift_mean"] = acc["no_rot_abs_shift_sum"] / shift_blocks
+    acc["random_rot_abs_shift_mean"] = acc["random_rot_abs_shift_sum"] / shift_blocks
+    acc["abs_shift_mean_delta"] = acc["random_rot_abs_shift_mean"] - acc["no_rot_abs_shift_mean"]
     return acc
 
 
@@ -480,6 +598,15 @@ def total_row(rows):
         "random_rot_sse": sum(row["random_rot_sse"] for row in rows),
         "no_rot_absmax": max((row["no_rot_absmax"] for row in rows), default=0.0),
         "random_rot_absmax": max((row["random_rot_absmax"] for row in rows), default=0.0),
+        "shift_blocks": sum(row["shift_blocks"] for row in rows),
+        "no_rot_shift_sum": sum(row["no_rot_shift_sum"] for row in rows),
+        "random_rot_shift_sum": sum(row["random_rot_shift_sum"] for row in rows),
+        "no_rot_abs_shift_sum": sum(row["no_rot_abs_shift_sum"] for row in rows),
+        "random_rot_abs_shift_sum": sum(row["random_rot_abs_shift_sum"] for row in rows),
+        "no_rot_shift_min": min((row["no_rot_shift_min"] for row in rows), default=0.0),
+        "no_rot_shift_max": max((row["no_rot_shift_max"] for row in rows), default=0.0),
+        "random_rot_shift_min": min((row["random_rot_shift_min"] for row in rows), default=0.0),
+        "random_rot_shift_max": max((row["random_rot_shift_max"] for row in rows), default=0.0),
     }
     return finalize_acc(total)
 
@@ -505,7 +632,8 @@ def format_table(rows, total, group_by):
         (
             f"{name_label:<36} {'mods':>5} {'numel':>14} "
             f"{'no_rot_mse':>14} {'rand_rot_mse':>14} {'ratio':>10} "
-            f"{'reduction':>10} {'no_rot_snr':>11} {'rand_snr':>11}"
+            f"{'reduction':>10} {'no_shift':>9} {'rot_shift':>9} {'d_shift':>9} "
+            f"{'no_rot_snr':>11} {'rand_snr':>11}"
         )
     ]
     for row in rows + [total]:
@@ -518,6 +646,9 @@ def format_table(rows, total, group_by):
             f"{row['random_rot_mse']:14.6e} "
             f"{row['ratio_random_over_no_rot']:10.4f} "
             f"{row['reduction_pct']:9.2f}% "
+            f"{row['no_rot_shift_mean']:9.3f} "
+            f"{row['random_rot_shift_mean']:9.3f} "
+            f"{row['shift_mean_delta']:9.3f} "
             f"{row['no_rot_snr_db']:10.2f}dB "
             f"{row['random_rot_snr_db']:10.2f}dB"
         )
@@ -584,6 +715,7 @@ def main():
         f"rotation_mode={args.rotation_mode}, hadamard_block_size={args.hadamard_block_size}, "
         f"seed={args.seed}\n"
         "ratio = random_rot_mse / no_rot_mse, reduction = 1 - ratio\n"
+        "shift = BFP block shared exponent in scale = 2^shift\n"
     )
     print(format_table(display_rows, total, args.group_by))
 
