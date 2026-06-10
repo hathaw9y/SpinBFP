@@ -251,6 +251,59 @@ def bfp_shift_stats(
     }
 
 
+def bfp_shared_exp_stats(
+    x,
+    bits=4,
+    block_size=BFP_DEFAULT_BLOCK_SIZE,
+    clip_ratio=1.0,
+    scale_method="absmax",
+    topk=1,
+):
+    if bits < 2:
+        raise ValueError(f"BFP bits must be at least 2, got {bits}.")
+    if block_size <= 0:
+        raise ValueError(f"BFP block size must be positive, got {block_size}.")
+
+    maxq = 2 ** (bits - 1) - 1
+    compute_dtype = _compute_dtype(x.dtype)
+    x = x.to(dtype=compute_dtype)
+    finfo = torch.finfo(compute_dtype)
+    x = torch.nan_to_num(x, nan=0.0, posinf=finfo.max, neginf=-finfo.max)
+    valid = torch.ones_like(x, dtype=torch.bool)
+
+    pad = (block_size - x.shape[-1] % block_size) % block_size
+    if pad:
+        x = F.pad(x, (0, pad))
+        valid = F.pad(valid, (0, pad), value=False)
+
+    x = x.reshape(-1, x.shape[-1] // block_size, block_size)
+    valid = valid.reshape_as(x)
+    _, shared_shift = _bfp_scale_and_shift(
+        x,
+        maxq=maxq,
+        finfo=finfo,
+        clip_ratio=clip_ratio,
+        scale_method=scale_method,
+        topk=topk,
+    )
+
+    abs_x = torch.abs(x) * clip_ratio
+    nonzero = valid & (abs_x > 0)
+    safe_abs = torch.where(nonzero, abs_x, torch.ones_like(abs_x))
+    elem_shift = torch.ceil(torch.log2(safe_abs / maxq))
+    same_shared_exp = nonzero & (elem_shift == shared_shift)
+    total_count = valid.sum().item()
+    nonzero_count = nonzero.sum().item()
+    same_count = same_shared_exp.sum().item()
+    return {
+        "shared_exp_count": same_count,
+        "shared_exp_total_count": total_count,
+        "shared_exp_nonzero_count": nonzero_count,
+        "shared_exp_share": same_count / max(total_count, 1),
+        "shared_exp_nonzero_share": same_count / max(nonzero_count, 1),
+    }
+
+
 def _power2_hadamard_transform(x):
     n = x.shape[-1]
     if not _is_pow2(n):
@@ -420,6 +473,14 @@ def row_for_weight(name, module, args):
         scale_method=args.w_scale_method,
         topk=args.w_topk,
     )
+    no_rot_shared_exp = bfp_shared_exp_stats(
+        weight,
+        bits=args.w_bits,
+        block_size=bfp_block_size,
+        clip_ratio=args.w_clip_ratio,
+        scale_method=args.w_scale_method,
+        topk=args.w_topk,
+    )
     del q
 
     rotated = rotate_weight(
@@ -440,6 +501,14 @@ def row_for_weight(name, module, args):
     )
     rot_sse = (rotated_float - q_rot.float()).pow(2).sum().item()
     rot_shift = bfp_shift_stats(
+        rotated,
+        bits=args.w_bits,
+        block_size=bfp_block_size,
+        clip_ratio=args.w_clip_ratio,
+        scale_method=args.w_scale_method,
+        topk=args.w_topk,
+    )
+    rot_shared_exp = bfp_shared_exp_stats(
         rotated,
         bits=args.w_bits,
         block_size=bfp_block_size,
@@ -500,6 +569,22 @@ def row_for_weight(name, module, args):
         "no_rot_shift_max": no_rot_shift["shift_max"],
         "random_rot_shift_min": rot_shift["shift_min"],
         "random_rot_shift_max": rot_shift["shift_max"],
+        "no_rot_shared_exp_count": no_rot_shared_exp["shared_exp_count"],
+        "random_rot_shared_exp_count": rot_shared_exp["shared_exp_count"],
+        "shared_exp_total_count": no_rot_shared_exp["shared_exp_total_count"],
+        "no_rot_shared_exp_nonzero_count": no_rot_shared_exp["shared_exp_nonzero_count"],
+        "random_rot_shared_exp_nonzero_count": rot_shared_exp["shared_exp_nonzero_count"],
+        "no_rot_shared_exp_share": no_rot_shared_exp["shared_exp_share"],
+        "random_rot_shared_exp_share": rot_shared_exp["shared_exp_share"],
+        "shared_exp_share_delta": (
+            rot_shared_exp["shared_exp_share"] - no_rot_shared_exp["shared_exp_share"]
+        ),
+        "no_rot_shared_exp_nonzero_share": no_rot_shared_exp["shared_exp_nonzero_share"],
+        "random_rot_shared_exp_nonzero_share": rot_shared_exp["shared_exp_nonzero_share"],
+        "shared_exp_nonzero_share_delta": (
+            rot_shared_exp["shared_exp_nonzero_share"]
+            - no_rot_shared_exp["shared_exp_nonzero_share"]
+        ),
     }
 
 
@@ -542,6 +627,11 @@ def aggregate_rows(rows, group_by):
                 "no_rot_shift_max": -float("inf"),
                 "random_rot_shift_min": float("inf"),
                 "random_rot_shift_max": -float("inf"),
+                "no_rot_shared_exp_count": 0,
+                "random_rot_shared_exp_count": 0,
+                "shared_exp_total_count": 0,
+                "no_rot_shared_exp_nonzero_count": 0,
+                "random_rot_shared_exp_nonzero_count": 0,
             }
         acc = grouped[key]
         acc["modules"] += row["modules"]
@@ -560,6 +650,11 @@ def aggregate_rows(rows, group_by):
         acc["no_rot_shift_max"] = max(acc["no_rot_shift_max"], row["no_rot_shift_max"])
         acc["random_rot_shift_min"] = min(acc["random_rot_shift_min"], row["random_rot_shift_min"])
         acc["random_rot_shift_max"] = max(acc["random_rot_shift_max"], row["random_rot_shift_max"])
+        acc["no_rot_shared_exp_count"] += row["no_rot_shared_exp_count"]
+        acc["random_rot_shared_exp_count"] += row["random_rot_shared_exp_count"]
+        acc["shared_exp_total_count"] += row["shared_exp_total_count"]
+        acc["no_rot_shared_exp_nonzero_count"] += row["no_rot_shared_exp_nonzero_count"]
+        acc["random_rot_shared_exp_nonzero_count"] += row["random_rot_shared_exp_nonzero_count"]
     return [finalize_acc(acc) for acc in grouped.values()]
 
 
@@ -582,6 +677,22 @@ def finalize_acc(acc):
     acc["no_rot_abs_shift_mean"] = acc["no_rot_abs_shift_sum"] / shift_blocks
     acc["random_rot_abs_shift_mean"] = acc["random_rot_abs_shift_sum"] / shift_blocks
     acc["abs_shift_mean_delta"] = acc["random_rot_abs_shift_mean"] - acc["no_rot_abs_shift_mean"]
+    total_count = max(acc.get("shared_exp_total_count", 0), 1)
+    no_rot_nonzero = max(acc.get("no_rot_shared_exp_nonzero_count", 0), 1)
+    random_rot_nonzero = max(acc.get("random_rot_shared_exp_nonzero_count", 0), 1)
+    acc["no_rot_shared_exp_share"] = acc["no_rot_shared_exp_count"] / total_count
+    acc["random_rot_shared_exp_share"] = acc["random_rot_shared_exp_count"] / total_count
+    acc["shared_exp_share_delta"] = (
+        acc["random_rot_shared_exp_share"] - acc["no_rot_shared_exp_share"]
+    )
+    acc["no_rot_shared_exp_nonzero_share"] = acc["no_rot_shared_exp_count"] / no_rot_nonzero
+    acc["random_rot_shared_exp_nonzero_share"] = (
+        acc["random_rot_shared_exp_count"] / random_rot_nonzero
+    )
+    acc["shared_exp_nonzero_share_delta"] = (
+        acc["random_rot_shared_exp_nonzero_share"]
+        - acc["no_rot_shared_exp_nonzero_share"]
+    )
     return acc
 
 
@@ -608,6 +719,15 @@ def total_row(rows):
         "no_rot_shift_max": max((row["no_rot_shift_max"] for row in rows), default=0.0),
         "random_rot_shift_min": min((row["random_rot_shift_min"] for row in rows), default=0.0),
         "random_rot_shift_max": max((row["random_rot_shift_max"] for row in rows), default=0.0),
+        "no_rot_shared_exp_count": sum(row["no_rot_shared_exp_count"] for row in rows),
+        "random_rot_shared_exp_count": sum(row["random_rot_shared_exp_count"] for row in rows),
+        "shared_exp_total_count": sum(row["shared_exp_total_count"] for row in rows),
+        "no_rot_shared_exp_nonzero_count": sum(
+            row["no_rot_shared_exp_nonzero_count"] for row in rows
+        ),
+        "random_rot_shared_exp_nonzero_count": sum(
+            row["random_rot_shared_exp_nonzero_count"] for row in rows
+        ),
     }
     return finalize_acc(total)
 
@@ -634,6 +754,7 @@ def format_table(rows, total, group_by):
             f"{name_label:<36} {'mods':>5} {'numel':>14} "
             f"{'no_rot_mse':>14} {'rand_rot_mse':>14} {'ratio':>10} "
             f"{'reduction':>10} {'no_shift':>9} {'rot_shift':>9} {'d_shift':>9} "
+            f"{'no_share':>9} {'rot_share':>9} {'d_share':>9} "
             f"{'no_rot_snr':>11} {'rand_snr':>11}"
         )
     ]
@@ -650,6 +771,9 @@ def format_table(rows, total, group_by):
             f"{row['no_rot_shift_mean']:9.3f} "
             f"{row['random_rot_shift_mean']:9.3f} "
             f"{row['shift_mean_delta']:9.3f} "
+            f"{row['no_rot_shared_exp_share']:9.3%} "
+            f"{row['random_rot_shared_exp_share']:9.3%} "
+            f"{row['shared_exp_share_delta']:9.3%} "
             f"{row['no_rot_snr_db']:10.2f}dB "
             f"{row['random_rot_snr_db']:10.2f}dB"
         )
@@ -717,6 +841,7 @@ def main():
         f"seed={args.seed}\n"
         "ratio = random_rot_mse / no_rot_mse, reduction = 1 - ratio\n"
         "shift = BFP block shared exponent in scale = 2^shift\n"
+        "share = fraction of real weight elements whose individual exponent equals the block shared exponent\n"
     )
     print(format_table(display_rows, total, args.group_by))
 
