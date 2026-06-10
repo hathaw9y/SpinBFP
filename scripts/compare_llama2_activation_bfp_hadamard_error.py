@@ -154,6 +154,7 @@ def _power2_hadamard_transform(x):
 
 
 def _hadamard_transform(x):
+    x = x.contiguous()
     if repo_hadamard_utils is not None:
         return repo_hadamard_utils.matmul_hadU(x)
     return _power2_hadamard_transform(x)
@@ -197,7 +198,7 @@ def apply_rotation_to_last_dim(x, block_size=None, seed=0):
 
     compute_dtype = _compute_dtype(x.dtype)
     x_dtype = x.dtype
-    x = x.to(dtype=compute_dtype)
+    x = x.to(dtype=compute_dtype).contiguous()
     sign_block_size = dim if block_size is None else block_size
 
     with torch.random.fork_rng(devices=[]):
