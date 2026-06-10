@@ -9,18 +9,21 @@ from collections import OrderedDict
 from pathlib import Path
 
 import torch
+import torch.nn.functional as F
 from datasets import load_dataset
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
-BLOCK_BFP_DIR = REPO_ROOT / "BlockBFP"
-sys.path.insert(0, str(BLOCK_BFP_DIR))
+sys.path.insert(0, str(REPO_ROOT))
 
-from llama_bfp import bfp_fake_quant, resolve_bfp_block_size_for_tensor  # noqa: E402
-from llama_rotation import apply_rotation_to_last_dim, resolve_rotation_block_size  # noqa: E402
+try:
+    from utils import hadamard_utils as repo_hadamard_utils  # noqa: E402
+except ImportError:
+    repo_hadamard_utils = None
 
 
+BFP_DEFAULT_BLOCK_SIZE = 32
 LAYER_RE = re.compile(r"(?:^|\.)layers\.(\d+)(?:\.|$)")
 LAYER_MODULE_RE = re.compile(r"(?:^|\.)layers\.(\d+)\.(.+)$")
 WEIGHT_COLUMN_ORDER = (
@@ -32,6 +35,180 @@ WEIGHT_COLUMN_ORDER = (
     "up_proj",
     "down_proj",
 )
+
+
+def _is_pow2(value):
+    return value > 0 and value & (value - 1) == 0
+
+
+def _compute_dtype(dtype):
+    if dtype in (torch.float16, torch.bfloat16):
+        return torch.float32
+    return dtype
+
+
+def resolve_bfp_block_size(groupsize):
+    return BFP_DEFAULT_BLOCK_SIZE if groupsize == -1 else groupsize
+
+
+def resolve_bfp_block_size_for_tensor(groupsize, x):
+    return x.shape[-1] if groupsize == 0 else resolve_bfp_block_size(groupsize)
+
+
+def _bfp_topk_shared_scale(x, *, maxq, finfo, clip_ratio=1.0, topk=1):
+    if topk <= 0:
+        raise ValueError(f"BFP topk must be positive, got {topk}.")
+
+    abs_x = torch.abs(x)
+    clipped_abs = abs_x * clip_ratio
+    nonzero = clipped_abs > 0
+    nonzero_count = nonzero.sum(dim=-1, keepdim=True)
+    safe_abs = torch.where(nonzero, clipped_abs, torch.ones_like(clipped_abs))
+    scale_exp = torch.ceil(torch.log2(safe_abs / maxq))
+    neg_inf = torch.full_like(scale_exp, -float("inf"))
+    scale_exp = torch.where(nonzero, scale_exp, neg_inf)
+    sorted_exp = torch.sort(scale_exp, dim=-1, descending=True).values
+    effective_k = torch.minimum(
+        nonzero_count,
+        torch.full_like(nonzero_count, min(topk, x.shape[-1])),
+    ).clamp(min=1)
+    shared_exp = sorted_exp.gather(dim=-1, index=effective_k.long() - 1)
+    shared_exp = torch.where(nonzero_count == 0, torch.zeros_like(shared_exp), shared_exp)
+    scale = 2 ** shared_exp
+    return torch.clamp(scale, min=finfo.tiny, max=finfo.max)
+
+
+def bfp_fake_quant(
+    x,
+    bits=4,
+    block_size=BFP_DEFAULT_BLOCK_SIZE,
+    clip_ratio=1.0,
+    scale_method="absmax",
+    topk=1,
+):
+    if bits < 2:
+        raise ValueError(f"BFP bits must be at least 2, got {bits}.")
+    if block_size <= 0:
+        raise ValueError(f"BFP block size must be positive, got {block_size}.")
+
+    minq = -(2 ** (bits - 1))
+    maxq = 2 ** (bits - 1) - 1
+    orig_shape = x.shape
+    orig_dtype = x.dtype
+    orig_finfo = torch.finfo(orig_dtype)
+
+    compute_dtype = _compute_dtype(x.dtype)
+    x = x.to(dtype=compute_dtype)
+    finfo = torch.finfo(compute_dtype)
+    x = torch.nan_to_num(x, nan=0.0, posinf=finfo.max, neginf=-finfo.max)
+
+    pad = (block_size - x.shape[-1] % block_size) % block_size
+    if pad:
+        x = F.pad(x, (0, pad))
+
+    x = x.reshape(-1, x.shape[-1] // block_size, block_size)
+    if scale_method == "absmax":
+        xmax = torch.amax(torch.abs(x), dim=-1, keepdim=True) * clip_ratio
+        safe_xmax = torch.where(xmax == 0, torch.ones_like(xmax), xmax)
+        scale = 2 ** torch.ceil(torch.log2(safe_xmax / maxq))
+        scale = torch.clamp(scale, min=finfo.tiny, max=finfo.max)
+        scale = torch.where(xmax == 0, torch.ones_like(scale), scale)
+    elif scale_method == "topk":
+        scale = _bfp_topk_shared_scale(
+            x,
+            maxq=maxq,
+            finfo=finfo,
+            clip_ratio=clip_ratio,
+            topk=topk,
+        )
+    else:
+        raise ValueError(f"Unknown BFP scale method: {scale_method}.")
+
+    q = torch.clamp(torch.round(x / scale), minq, maxq)
+    q = torch.nan_to_num(q, nan=0.0, posinf=maxq, neginf=minq)
+    xhat = (q * scale).reshape(*orig_shape[:-1], -1)
+    xhat = torch.nan_to_num(xhat, nan=0.0, posinf=finfo.max, neginf=-finfo.max)
+    xhat = torch.clamp(xhat, min=orig_finfo.min, max=orig_finfo.max)
+
+    if pad:
+        xhat = xhat[..., : orig_shape[-1]]
+    return xhat.reshape(orig_shape).to(dtype=orig_dtype)
+
+
+def _power2_hadamard_transform(x):
+    n = x.shape[-1]
+    if not _is_pow2(n):
+        raise ValueError(f"Power-of-two Hadamard requires pow2 dim, got {n}.")
+
+    y = x.reshape(-1, n).clone()
+    h = 1
+    while h < n:
+        y = y.reshape(-1, n // (2 * h), 2, h)
+        a = y[:, :, 0, :].clone()
+        b = y[:, :, 1, :].clone()
+        y[:, :, 0, :] = a + b
+        y[:, :, 1, :] = a - b
+        y = y.reshape(-1, n)
+        h *= 2
+    return y.reshape_as(x) / math.sqrt(n)
+
+
+def _hadamard_transform(x):
+    if repo_hadamard_utils is not None:
+        return repo_hadamard_utils.matmul_hadU(x)
+    return _power2_hadamard_transform(x)
+
+
+def resolve_rotation_block_size(rotation_block_size, hidden_size, bfp_block_size=32):
+    if rotation_block_size == -1:
+        block_size = bfp_block_size
+    elif rotation_block_size == 0:
+        block_size = None
+    else:
+        block_size = rotation_block_size
+
+    if block_size is None:
+        if repo_hadamard_utils is None and not _is_pow2(hidden_size):
+            raise ValueError(
+                f"Full Hadamard for dimension {hidden_size} requires repo utils/hadamard_utils.py. "
+                "Use --hadamard-block-size 32 on a minimal checkout."
+            )
+        if repo_hadamard_utils is not None:
+            try:
+                repo_hadamard_utils.get_hadK(hidden_size)
+            except AssertionError as exc:
+                raise ValueError(f"Full Hadamard is not supported for dimension {hidden_size}.") from exc
+        return None
+
+    if not _is_pow2(block_size):
+        raise ValueError(f"Hadamard block size must be a power of 2, got {block_size}.")
+    if hidden_size % block_size != 0:
+        raise ValueError(f"Dimension {hidden_size} must be divisible by block size {block_size}.")
+    return block_size
+
+
+def apply_rotation_to_last_dim(x, block_size=None, seed=0):
+    dim = x.shape[-1]
+    if block_size is not None:
+        if not _is_pow2(block_size):
+            raise ValueError(f"Hadamard block size must be a power of 2, got {block_size}.")
+        if dim % block_size != 0:
+            raise ValueError(f"Dimension {dim} must be divisible by block size {block_size}.")
+
+    compute_dtype = _compute_dtype(x.dtype)
+    x_dtype = x.dtype
+    x = x.to(dtype=compute_dtype)
+    sign_block_size = dim if block_size is None else block_size
+
+    with torch.random.fork_rng(devices=[]):
+        torch.manual_seed(seed)
+        signs = torch.randint(0, 2, (dim,), dtype=torch.int64)
+    signs = signs.to(device=x.device, dtype=compute_dtype).mul_(2).sub_(1)
+    signs = signs.reshape(dim // sign_block_size, sign_block_size)
+
+    x_blocks = x.reshape(*x.shape[:-1], dim // sign_block_size, sign_block_size)
+    output = _hadamard_transform(x_blocks * signs)
+    return output.reshape_as(x).to(dtype=x_dtype)
 
 
 def parse_args():
