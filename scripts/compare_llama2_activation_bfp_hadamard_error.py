@@ -215,7 +215,7 @@ def parse_args():
     parser = argparse.ArgumentParser(
         description=(
             "Compare LLaMA activation BFP quantization error with and without "
-            "a random Hadamard transform on one WikiText-2 sample."
+            "a random Hadamard transform on WikiText-2 samples."
         )
     )
     parser.add_argument("--model-name", default="meta-llama/Llama-2-7b-hf")
@@ -236,8 +236,10 @@ def parse_args():
         "--sample-index",
         type=int,
         default=0,
-        help="Non-overlapping WikiText-2 chunk index. sample-index=0 uses the first seqlen tokens.",
+        help="First non-overlapping WikiText-2 chunk index. sample-index=0 starts at the first token.",
     )
+    parser.add_argument("--nsamples", type=int, default=1)
+    parser.add_argument("--batch-size", type=int, default=1)
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--a-bits", type=int, default=4)
     parser.add_argument("--a-groupsize", type=int, default=-1)
@@ -265,6 +267,7 @@ def parse_args():
         help="Optional suffix filter, e.g. q_proj k_proj v_proj o_proj gate_proj up_proj down_proj.",
     )
     parser.add_argument("--include-lm-head", action="store_true")
+    parser.add_argument("--total-only", action="store_true")
     parser.add_argument("--csv-output", default=None)
     parser.add_argument("--json-output", default=None)
     return parser.parse_args()
@@ -480,18 +483,21 @@ def remove_hooks(handles):
         handle.remove()
 
 
-def load_wikitext2_sample(tokenizer, *, split, seqlen, sample_index, device):
+def load_wikitext2_samples(tokenizer, *, split, seqlen, sample_index, nsamples, device):
+    if nsamples <= 0:
+        raise ValueError(f"nsamples must be positive, got {nsamples}.")
+
     dataset = load_dataset("wikitext", "wikitext-2-raw-v1", split=split)
     text = "\n\n".join(dataset["text"])
     input_ids = tokenizer(text, return_tensors="pt").input_ids
     start = sample_index * seqlen
-    end = start + seqlen
+    end = start + nsamples * seqlen
     if input_ids.shape[1] < end:
         raise ValueError(
             f"WikiText-2 {split} has only {input_ids.shape[1]} tokens, "
-            f"cannot read sample_index={sample_index}, seqlen={seqlen}."
+            f"cannot read sample_index={sample_index}, nsamples={nsamples}, seqlen={seqlen}."
         )
-    return input_ids[:, start:end].to(device)
+    return input_ids[:, start:end].reshape(nsamples, seqlen).to(device)
 
 
 def sorted_rows(rows, group_by):
@@ -568,6 +574,8 @@ def main():
     args = parse_args()
     if args.device == "cuda" and not torch.cuda.is_available():
         raise RuntimeError("--device cuda was requested, but CUDA is not available.")
+    if args.batch_size <= 0:
+        raise ValueError(f"batch_size must be positive, got {args.batch_size}.")
 
     torch.manual_seed(args.seed)
     dtype = torch_dtype(args.dtype)
@@ -594,11 +602,12 @@ def main():
         model.config.use_cache = False
 
     input_device = next(model.parameters()).device
-    input_ids = load_wikitext2_sample(
+    input_ids = load_wikitext2_samples(
         tokenizer,
         split=args.split,
         seqlen=args.seqlen,
         sample_index=args.sample_index,
+        nsamples=args.nsamples,
         device=input_device,
     )
 
@@ -623,23 +632,26 @@ def main():
 
     try:
         with torch.no_grad():
-            model(input_ids=input_ids)
+            for start in range(0, input_ids.shape[0], args.batch_size):
+                model(input_ids=input_ids[start : start + args.batch_size])
     finally:
         remove_hooks(handles)
 
     rows = sorted_rows(collector.rows(), args.group_by)
     total = total_row(rows)
-    all_rows = rows + [total]
+    display_rows = [] if args.total_only else rows
+    all_rows = [total] if args.total_only else rows + [total]
     print(
         "LLaMA activation BFP quantization error comparison\n"
         f"model={args.model_name}, dataset=wikitext2/{args.split}, "
-        f"sample_index={args.sample_index}, seqlen={args.seqlen}\n"
+        f"sample_index={args.sample_index}, nsamples={args.nsamples}, "
+        f"seqlen={args.seqlen}, batch_size={args.batch_size}\n"
         f"a_bits={args.a_bits}, a_groupsize={args.a_groupsize}, "
         f"clip_ratio={args.a_clip_ratio}, scale_method={args.a_scale_method}, topk={args.a_topk}, "
         f"hadamard_block_size={args.hadamard_block_size}, seed={args.seed}\n"
         "ratio = random_had_mse / no_had_mse, reduction = 1 - ratio\n"
     )
-    print(format_table(rows, total, args.group_by))
+    print(format_table(display_rows, total, args.group_by))
 
     if args.csv_output is not None:
         write_csv(args.csv_output, all_rows)
